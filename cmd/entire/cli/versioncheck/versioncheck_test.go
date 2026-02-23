@@ -35,7 +35,7 @@ func TestIsOutdated(t *testing.T) {
 		{"1.0.0", "v1.0.1", true, "mixed v prefix reversed"},
 
 		// Pre-release versions (semver uses hyphen)
-		{"1.0.0-rc1", "1.0.0", false, "prerelease in current"},
+		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
 
 		// Git describe format (should strip suffix before comparing)
