@@ -231,9 +231,10 @@ func isOutdated(current, latest string) bool {
 		latest = "v" + latest
 	}
 
-	// Skip notification for prerelease versions (development builds).
-	// We don't publish prerelease versions, so these are development builds and shouldn't trigger update notifications.
-	if semver.Prerelease(current) != "" {
+	// Skip notification for dev builds (e.g., "1.0.0-dev-xxx").
+	// These are local development builds and shouldn't trigger update notifications.
+	// Normal prereleases (e.g., "1.0.0-rc1") should still be compared normally.
+	if strings.Contains(semver.Prerelease(current), "dev") {
 		return false
 	}
 

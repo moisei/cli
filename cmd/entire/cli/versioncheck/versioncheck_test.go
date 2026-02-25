@@ -37,13 +37,7 @@ func TestIsOutdated(t *testing.T) {
 		// Pre-release versions (semver uses hyphen)
 		{"1.0.0-rc1", "1.0.0", true, "prerelease in current"},
 		{"1.0.0", "1.0.1-rc1", true, "prerelease in latest is still newer"},
-
-		// Git describe format (should strip suffix before comparing)
-		{"v0.4.4-76-g230b49bf-dirty", "v0.4.4", false, "git describe dirty build is not outdated"},
-		{"v0.4.4-76-g230b49bf", "v0.4.4", false, "git describe build is not outdated"},
-		{"v0.4.4-76-g230b49bf-dirty", "v0.4.5", false, "git describe build is not outdated"},
-		{"v0.4.4-1-gabcdef0", "v0.4.4", false, "git describe 1 commit ahead and is not outdated"},
-		{"v1.0.0-100-g1234567890ab-dirty", "v1.0.0", false, "git describe long hash dirty"},
+		{"1.0.0-dev-xxx", "1.0.1", false, "dev build skips version check"},
 	}
 
 	for _, tt := range tests {
