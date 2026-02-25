@@ -3,22 +3,26 @@ package strategy
 import (
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
+
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 // MaxDescriptionLength is the maximum length for descriptions in commit messages
 // before truncation occurs.
 const MaxDescriptionLength = 60
 
-// TruncateDescription truncates a string to maxLen characters, adding "..." if truncated.
-// If maxLen is less than 3, returns a string of dots up to maxLen.
+// TruncateDescription truncates a string to maxLen runes, adding "..." if truncated.
+// Uses rune-based slicing to avoid splitting multi-byte UTF-8 characters.
+// If maxLen is less than 3, truncates without ellipsis.
 func TruncateDescription(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
 	if maxLen < 3 {
-		return s[:maxLen]
+		return stringutil.TruncateRunes(s, maxLen, "")
 	}
-	return s[:maxLen-3] + "..."
+	return stringutil.TruncateRunes(s, maxLen, "...")
 }
 
 // FormatSubagentEndMessage formats a commit message for when a subagent completes.

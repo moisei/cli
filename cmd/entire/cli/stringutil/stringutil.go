@@ -21,11 +21,10 @@ func CollapseWhitespace(s string) string {
 // TruncateRunes truncates a string to at most maxRunes runes, appending suffix if truncated.
 // This is safe for multi-byte UTF-8 characters unlike byte-based slicing.
 func TruncateRunes(s string, maxRunes int, suffix string) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
+	if utf8.RuneCountInString(s) <= maxRunes {
 		return s
 	}
-	// Leave room for the suffix
+	runes := []rune(s)
 	suffixRunes := []rune(suffix)
 	truncateAt := maxRunes - len(suffixRunes)
 	if truncateAt < 0 {

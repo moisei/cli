@@ -1256,7 +1256,7 @@ Create only this file.`
 
 	// No new checkpoint should have been created
 	checkpointsAfter := env.GetAllCheckpointIDsFromHistory()
-	assert.Equal(t, len(checkpointsBefore), len(checkpointsAfter),
+	assert.Len(t, checkpointsAfter, len(checkpointsBefore),
 		"No new checkpoint should have been created when trailer is removed")
 }
 
@@ -1295,6 +1295,6 @@ Create only this file.`
 	// This commit should NOT have a new checkpoint — the session is depleted
 	// (all agent files were already committed) and the new edit is purely manual.
 	allCheckpointIDs := env.GetAllCheckpointIDsFromHistory()
-	assert.Equal(t, len(checkpointIDs), len(allCheckpointIDs),
+	assert.Len(t, allCheckpointIDs, len(checkpointIDs),
 		"Manual edit after session depletion should not create a new checkpoint")
 }

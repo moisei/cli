@@ -6,12 +6,17 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/spf13/cobra"
 )
 
 const unknownStrategyName = "unknown"
+
+// gitHooksDisabled is set by PersistentPreRunE when Entire is not set up or disabled.
+// When true, all git hook commands return early without doing any work.
+var gitHooksDisabled bool
 
 // gitHookContext holds common state for git hook logging.
 type gitHookContext struct {
@@ -59,7 +64,14 @@ func (g *gitHookContext) logCompleted(err error, extraAttrs ...any) {
 
 // initHookLogging initializes logging for hooks by finding the most recent session.
 // Returns a cleanup function that should be deferred.
+// If Entire is not set up or disabled, returns a no-op to avoid creating files.
 func initHookLogging() func() {
+	// Don't create any files if Entire is not set up or disabled.
+	// This is checked here as defense-in-depth (also checked in PersistentPreRunE).
+	if !settings.IsSetUpAndEnabled() {
+		return func() {}
+	}
+
 	// Set up log level getter so logging can read from settings
 	logging.SetLogLevelGetter(GetLogLevel)
 
@@ -83,6 +95,13 @@ func newHooksGitCmd() *cobra.Command {
 		Long:   "Commands called by git hooks. These delegate to the current strategy.",
 		Hidden: true, // Internal command, not for direct user use
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			// Check if Entire is set up and enabled before doing any work.
+			// This prevents global git hooks from doing anything in repos where
+			// Entire was never enabled or has been disabled.
+			if !settings.IsSetUpAndEnabled() {
+				gitHooksDisabled = true
+				return nil
+			}
 			hookLogCleanup = initHookLogging()
 			return nil
 		},
@@ -108,6 +127,10 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 		Short: "Handle prepare-commit-msg git hook",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+
 			commitMsgFile := args[0]
 			var source string
 			if len(args) > 1 {
@@ -133,6 +156,10 @@ func newHooksGitCommitMsgCmd() *cobra.Command {
 		Short: "Handle commit-msg git hook",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+
 			commitMsgFile := args[0]
 
 			g := newGitHookContext("commit-msg")
@@ -155,6 +182,10 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 		Short: "Handle post-commit git hook",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+
 			g := newGitHookContext("post-commit")
 			g.logInvoked()
 
@@ -174,6 +205,10 @@ func newHooksGitPrePushCmd() *cobra.Command {
 		Short: "Handle pre-push git hook",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if gitHooksDisabled {
+				return nil
+			}
+
 			remote := args[0]
 
 			g := newGitHookContext("pre-push")

@@ -23,7 +23,7 @@ func setupCleanTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	}
 
 	t.Chdir(dir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create initial commit
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
@@ -107,8 +107,8 @@ func TestRunClean_PreviewMode(t *testing.T) {
 	output := stdout.String()
 
 	// Should show preview header
-	if !strings.Contains(output, "orphaned items") {
-		t.Errorf("Expected 'orphaned items' in output, got: %s", output)
+	if !strings.Contains(output, "items to clean") {
+		t.Errorf("Expected 'items to clean' in output, got: %s", output)
 	}
 
 	// Should list the shadow branches
@@ -208,7 +208,7 @@ func TestRunClean_SessionsBranchPreserved(t *testing.T) {
 func TestRunClean_NotGitRepository(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	var stdout bytes.Buffer
 	err := runClean(&stdout, false)
@@ -240,7 +240,7 @@ func TestRunClean_Subdirectory(t *testing.T) {
 	}
 
 	t.Chdir(subDir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	var stdout bytes.Buffer
 	err = runClean(&stdout, false)
@@ -274,7 +274,7 @@ func TestRunCleanWithItems_PartialFailure(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runCleanWithItems(&stdout, true, items) // force=true
+	err := runCleanWithItems(&stdout, true, items, nil) // force=true
 
 	// Should return an error because one branch failed to delete
 	if err == nil {
@@ -310,7 +310,7 @@ func TestRunCleanWithItems_AllFailures(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runCleanWithItems(&stdout, true, items) // force=true
+	err := runCleanWithItems(&stdout, true, items, nil) // force=true
 
 	// Should return an error because all items failed to delete
 	if err == nil {
@@ -338,7 +338,7 @@ func TestRunCleanWithItems_NoItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	var stdout bytes.Buffer
-	err := runCleanWithItems(&stdout, false, []strategy.CleanupItem{})
+	err := runCleanWithItems(&stdout, false, []strategy.CleanupItem{}, nil)
 	if err != nil {
 		t.Fatalf("runCleanWithItems() error = %v", err)
 	}
@@ -360,7 +360,7 @@ func TestRunCleanWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	err := runCleanWithItems(&stdout, false, items) // preview mode
+	err := runCleanWithItems(&stdout, false, items, nil) // preview mode
 	if err != nil {
 		t.Fatalf("runCleanWithItems() error = %v", err)
 	}
@@ -379,7 +379,7 @@ func TestRunCleanWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	// Should show total count
-	if !strings.Contains(output, "Found 3 orphaned items") {
-		t.Errorf("Expected 'Found 3 orphaned items', got: %s", output)
+	if !strings.Contains(output, "Found 3 items to clean") {
+		t.Errorf("Expected 'Found 3 items to clean', got: %s", output)
 	}
 }

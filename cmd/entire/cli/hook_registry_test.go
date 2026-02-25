@@ -27,7 +27,7 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo (required for paths.RepoRoot to work)
+	// Initialize git repo (required for paths.WorktreeRoot to work)
 	gitInit := exec.CommandContext(context.Background(), "git", "init")
 	if err := gitInit.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
@@ -58,6 +58,12 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	// Create settings.json to indicate Entire is set up in this repo
+	settingsFile := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"strategy":"manual-commit"}`), 0o644); err != nil {
+		t.Fatalf("failed to create settings file: %v", err)
 	}
 
 	// Create logs directory
@@ -236,7 +242,7 @@ func TestHookCommand_SetsCurrentHookAgentName(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo (required for paths.RepoRoot to work)
+	// Initialize git repo (required for paths.WorktreeRoot to work)
 	gitInit := exec.CommandContext(context.Background(), "git", "init")
 	if err := gitInit.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)

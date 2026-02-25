@@ -701,13 +701,13 @@ func (s *GitStore) buildTreeWithChanges(
 	modifiedFiles, deletedFiles []string,
 	metadataDir, metadataDirAbs string,
 ) (plumbing.Hash, error) {
-	// Get repo root for resolving file paths
+	// Get worktree root for resolving file paths
 	// This is critical because fileExists() and createBlobFromFile() use os.Stat()
 	// which resolves relative to CWD. The modifiedFiles are repo-relative paths,
 	// so we must resolve them against repo root, not CWD.
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		return plumbing.ZeroHash, fmt.Errorf("failed to get repo root: %w", err)
+		return plumbing.ZeroHash, fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
 	// Get the base tree
@@ -1068,7 +1068,7 @@ type changedFilesResult struct {
 //
 // Uses `git status --porcelain -z` for reliable parsing of filenames with special characters.
 func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFilesResult, error) {
-	// Get repo root directory for running git command
+	// Get worktree root directory for running git command
 	wt, err := repo.Worktree()
 	if err != nil {
 		return changedFilesResult{}, fmt.Errorf("failed to get worktree: %w", err)

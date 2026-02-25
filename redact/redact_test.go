@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -123,10 +124,23 @@ func TestShouldSkipJSONLField(t *testing.T) {
 		{"userIds", true},
 		// Exact match "signature" should be skipped.
 		{"signature", true},
+		// Path-related fields should be skipped.
+		{"filePath", true},
+		{"file_path", true},
+		{"cwd", true},
+		{"root", true},
+		{"directory", true},
+		{"dir", true},
+		{"path", true},
 		// Fields that should NOT be skipped.
 		{"content", false},
 		{"type", false},
 		{"name", false},
+		{"text", false},
+		{"output", false},
+		{"input", false},
+		{"command", false},
+		{"args", false},
 		{"video", false},      // ends in "o", not "id"
 		{"identify", false},   // ends in "ify", not "id"
 		{"signatures", false}, // not exact match "signature"
@@ -271,5 +285,166 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 	wantRepls2 := [][2]string{{highEntropySecret, "REDACTED"}}
 	if !slices.Equal(repls2, wantRepls2) {
 		t.Errorf("got %q, want %q", repls2, wantRepls2)
+	}
+}
+
+func TestString_FilePaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "temp directory path preserves filenames",
+			input: "/tmp/TestE2E_Something3407889464/001/controller.go",
+			want:  "/tmp/TestE2E_Something3407889464/001/controller.go",
+		},
+		{
+			name:  "macOS private var folders path",
+			input: "/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller",
+			want:  "/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/TestE2E_Something/controller",
+		},
+		{
+			name:  "simple Go file path",
+			input: "Reading file: /tmp/test/model.go",
+			want:  "Reading file: /tmp/test/model.go",
+		},
+		{
+			name:  "user home directory path",
+			input: "/Users/peytonmontei/.claude/projects/something.jsonl",
+			want:  "/Users/peytonmontei/.claude/projects/something.jsonl",
+		},
+		{
+			name:  "multiple paths separated by newlines",
+			input: "/tmp/test/controller.go\n/tmp/test/model.go\n/tmp/test/view.go",
+			want:  "/tmp/test/controller.go\n/tmp/test/model.go\n/tmp/test/view.go",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_JSONEscapeSequences(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "newline escape not corrupted",
+			input: `controller.go\nmodel.go\nview.go`,
+			want:  `controller.go\nmodel.go\nview.go`,
+		},
+		{
+			name:  "tab escape not corrupted",
+			input: `something.go\tanother.go`,
+			want:  `something.go\tanother.go`,
+		},
+		{
+			name:  "backslash escape not corrupted",
+			input: `C:\\Users\\test\\file.go`,
+			want:  `C:\\Users\\test\\file.go`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := String(tt.input)
+			if got != tt.want {
+				t.Errorf("String(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestString_RealSecretsStillCaught(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "high entropy API key",
+			input: "api_key=" + highEntropySecret,
+		},
+		{
+			name:  "AWS access key (pattern-based)",
+			input: "key=AKIAYRWQG5EJLPZLBYNP",
+		},
+		{
+			name:  "GitHub personal access token",
+			input: "token=ghp_1234567890abcdefghijklmnopqrstuvwxyzAB",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := String(tt.input)
+			if !strings.Contains(got, "REDACTED") {
+				t.Errorf("String(%q) = %q, expected REDACTED somewhere", tt.input, got)
+			}
+		})
+	}
+}
+
+func TestJSONLContent_PathFieldsPreserved(t *testing.T) {
+	t.Parallel()
+	// Simulates a real agent log line with path fields that should NOT be redacted
+	input := `{"session_id":"ses_37273a1fdffegpYbwUTqEkPsQ0","file_path":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test/controller.go","cwd":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test","root":"/private/var/folders/v4/31cd3cg52_sfrpb1mbtr7q7r0000gn/T/test","directory":"/tmp/TestE2E_ExistingFiles","content":"normal text here"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Structural fields should be preserved
+	mustContain := []string{
+		"ses_37273a1fdffegpYbwUTqEkPsQ0", // session_id (skipped by *id rule)
+		"/private/var/folders",           // file_path (skipped by path rule)
+		"controller.go",                  // filename in file_path
+		"/tmp/TestE2E_ExistingFiles",     // directory (skipped by path rule)
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(result, s) {
+			t.Errorf("expected %q to be preserved, but result is: %s", s, result)
+		}
+	}
+
+	// No false positives
+	if strings.Contains(result, "REDACTED") {
+		t.Errorf("expected no redactions in structural fields, got: %s", result)
+	}
+}
+
+func TestJSONLContent_SecretsInContentStillCaught(t *testing.T) {
+	t.Parallel()
+	// Path fields should be preserved, but secrets in content should be caught
+	input := `{"file_path":"/tmp/test.go","content":"api_key=` + highEntropySecret + `"}`
+
+	result, err := JSONLContent(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// file_path should be preserved
+	if !strings.Contains(result, "/tmp/test.go") {
+		t.Error("file_path was incorrectly modified")
+	}
+
+	// Secret in content should be redacted
+	if strings.Contains(result, highEntropySecret) {
+		t.Error("secret in content field was not redacted")
+	}
+	if !strings.Contains(result, "REDACTED") {
+		t.Error("expected REDACTED in output")
 	}
 }

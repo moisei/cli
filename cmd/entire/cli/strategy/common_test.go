@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -92,6 +94,152 @@ func TestOpenRepositoryError(t *testing.T) {
 	_, err := OpenRepository()
 	if err == nil {
 		t.Fatal("OpenRepository() should have failed in non-repository directory")
+	}
+}
+
+func TestWorktreeRoot_Cache(t *testing.T) {
+	// Uses t.Chdir + t.Setenv so cannot be parallel.
+	tmpDir := t.TempDir()
+	initTestRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// First call populates the cache via git.
+	got, err := paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() first call error: %v", err)
+	}
+
+	// Resolve symlinks for comparison (macOS /var -> /private/var).
+	want, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("paths.WorktreeRoot() = %q, want %q", got, want)
+	}
+
+	// Break git by pointing PATH at an empty directory.
+	// If the second call hits git it will fail.
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
+
+	got2, err := paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() cached call should succeed, got error: %v", err)
+	}
+	if got2 != want {
+		t.Fatalf("paths.WorktreeRoot() cached = %q, want %q", got2, want)
+	}
+
+	// After clearing the cache the broken PATH should cause a failure.
+	paths.ClearWorktreeRootCache()
+	_, err = paths.WorktreeRoot()
+	if err == nil {
+		t.Fatal("paths.WorktreeRoot() should fail after cache clear with broken PATH")
+	}
+}
+
+func TestWorktreeRoot_MainRepo(t *testing.T) {
+	// In a normal (non-worktree) repo, WorktreeRoot returns the repo root.
+	// Uses t.Chdir so cannot be parallel.
+	tmpDir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks error: %v", err)
+	}
+	tmpDir = resolved
+
+	initTestRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	got, err := paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() error: %v", err)
+	}
+	if got != tmpDir {
+		t.Errorf("paths.WorktreeRoot() = %q, want repo root %q", got, tmpDir)
+	}
+
+	// Also works from a subdirectory.
+	subDir := filepath.Join(tmpDir, "sub", "dir")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+	t.Chdir(subDir)
+	paths.ClearWorktreeRootCache()
+
+	got, err = paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() from subdir error: %v", err)
+	}
+	if got != tmpDir {
+		t.Errorf("paths.WorktreeRoot() from subdir = %q, want repo root %q", got, tmpDir)
+	}
+}
+
+func TestWorktreeRoot_Worktree(t *testing.T) {
+	// In a git worktree, WorktreeRoot must return the worktree's own root,
+	// NOT the main repository root. The worktree is placed in a separate
+	// temp directory (sibling, not child) so the two paths share no prefix.
+	// Uses t.Chdir so cannot be parallel.
+	mainDir := t.TempDir()
+	mainResolved, err := filepath.EvalSymlinks(mainDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks error: %v", err)
+	}
+	mainDir = mainResolved
+
+	initTestRepo(t, mainDir)
+
+	worktreeDir := t.TempDir()
+	wtResolved, err := filepath.EvalSymlinks(worktreeDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks error: %v", err)
+	}
+	worktreeDir = wtResolved
+
+	// t.TempDir() creates the directory; git worktree add needs it to not exist.
+	if err := os.Remove(worktreeDir); err != nil {
+		t.Fatalf("failed to remove temp dir for worktree: %v", err)
+	}
+	if err := createWorktree(mainDir, worktreeDir, "wt-branch"); err != nil {
+		t.Fatalf("failed to create worktree: %v", err)
+	}
+	t.Cleanup(func() { removeWorktree(mainDir, worktreeDir) })
+
+	t.Chdir(worktreeDir)
+	paths.ClearWorktreeRootCache()
+
+	got, err := paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() error: %v", err)
+	}
+	if got != worktreeDir {
+		t.Errorf("paths.WorktreeRoot() = %q, want worktree root %q", got, worktreeDir)
+	}
+	if got == mainDir {
+		t.Errorf("paths.WorktreeRoot() returned main repo root %q, must return worktree root", mainDir)
+	}
+
+	// Also works from a subdirectory within the worktree.
+	subDir := filepath.Join(worktreeDir, "deep", "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+	t.Chdir(subDir)
+	paths.ClearWorktreeRootCache()
+
+	got, err = paths.WorktreeRoot()
+	if err != nil {
+		t.Fatalf("paths.WorktreeRoot() from worktree subdir error: %v", err)
+	}
+	if got != worktreeDir {
+		t.Errorf("paths.WorktreeRoot() from worktree subdir = %q, want %q", got, worktreeDir)
+	}
+	if got == mainDir {
+		t.Errorf("paths.WorktreeRoot() from worktree subdir returned main repo root %q", mainDir)
 	}
 }
 

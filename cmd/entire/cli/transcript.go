@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
@@ -254,6 +256,21 @@ func extractModifiedFiles(transcript []transcriptLine) []string {
 	}
 
 	return files
+}
+
+// resolveTranscriptPath determines the correct file path for an agent's session transcript.
+// Computes the path dynamically from the current repo location for cross-machine portability.
+func resolveTranscriptPath(sessionID string, agent agentpkg.Agent) (string, error) {
+	repoRoot, err := paths.WorktreeRoot()
+	if err != nil {
+		return "", fmt.Errorf("failed to get worktree root: %w", err)
+	}
+
+	sessionDir, err := agent.GetSessionDir(repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to get agent session directory: %w", err)
+	}
+	return agent.ResolveSessionFile(sessionDir, sessionID), nil
 }
 
 // AgentTranscriptPath returns the path to a subagent's transcript file.

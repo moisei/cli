@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -37,32 +37,19 @@ func sessionStateFile(sessionID string) (string, error) {
 }
 
 // LoadSessionState loads the session state for the given session ID.
-// Returns (nil, nil) when session file doesn't exist (not an error condition).
+// Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
+// Stale sessions are automatically deleted by the underlying StateStore.
 func LoadSessionState(sessionID string) (*SessionState, error) {
-	// Validate session ID to prevent path traversal
-	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return nil, fmt.Errorf("invalid session ID: %w", err)
-	}
-
-	stateFile, err := sessionStateFile(sessionID)
+	store, err := session.NewStateStore()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session state file path: %w", err)
+		return nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	data, err := os.ReadFile(stateFile) //nolint:gosec // stateFile is derived from sessionID, not user input
-	if os.IsNotExist(err) {
-		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
-	}
+	state, err := store.Load(context.Background(), sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read session state: %w", err)
+		return nil, fmt.Errorf("failed to load session state: %w", err)
 	}
-
-	var state SessionState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
-	}
-	state.NormalizeAfterLoad()
-	return &state, nil
+	return state, nil
 }
 
 // SaveSessionState saves the session state atomically.
@@ -128,7 +115,7 @@ func FindMostRecentSession() string {
 	}
 
 	// Scope to current worktree to prevent cross-worktree pollution.
-	worktreePath, wpErr := GetWorktreePath()
+	worktreePath, wpErr := paths.WorktreeRoot()
 	if wpErr == nil && worktreePath != "" {
 		var filtered []*SessionState
 		for _, s := range states {

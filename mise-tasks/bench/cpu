@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Run benchmarks with CPU profile (single package)"
+set -euo pipefail
+
+PKG="${BENCH_PKG:-./cmd/entire/cli/benchutil/}"
+echo "Profiling package: $PKG (override with BENCH_PKG=./path/to/pkg)"
+go test -bench=. -benchmem -run='^$' -cpuprofile=cpu.prof -timeout=10m "$PKG"
+echo "Profile saved to cpu.prof. View with: go tool pprof -http=:8080 cpu.prof"

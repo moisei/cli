@@ -291,6 +291,9 @@ func BranchExistsLocally(branchName string) (bool, error) {
 // Should be switched back to go-git once we upgrade to go-git v6
 // Returns an error if the ref doesn't exist or checkout fails.
 func CheckoutBranch(ref string) error {
+	if strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("checkout failed: invalid ref %q", ref)
+	}
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "git", "checkout", ref)
 	if output, err := cmd.CombinedOutput(); err != nil {

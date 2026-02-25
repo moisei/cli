@@ -16,6 +16,10 @@ jobs:
   e2e-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [claude, opencode]
 
     steps:
       - name: Checkout repository
@@ -24,18 +28,16 @@ jobs:
       - name: Setup mise
         uses: jdx/mise-action@v3
 
-      - name: Install Claude CLI
+      - name: Install agent CLI
         run: |
-          echo "Installing Claude Code CLI..."
-          curl -fsSL https://claude.ai/install.sh | bash
+          case "${{ matrix.agent }}" in
+            claude)   curl -fsSL https://claude.ai/install.sh | bash ;;
+            opencode) curl -fsSL https://opencode.ai/install | bash ;;
+          esac
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Verify Claude CLI installation
-        run: |
-          claude --version
 
       - name: Run E2E Tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          mise run test:e2e:claude
+          mise run test:e2e:${{ matrix.agent }}

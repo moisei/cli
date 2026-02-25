@@ -285,10 +285,10 @@ func handleLifecycleTurnEnd(ag agent.Agent, event *agent.Event) error {
 	commitMessage := generateCommitMessage(lastPrompt)
 	fmt.Fprintf(os.Stderr, "Using commit message: %s\n", commitMessage)
 
-	// Get repo root for path normalization
-	repoRoot, err := paths.RepoRoot()
+	// Get worktree root for path normalization
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
+		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
 	var preUntrackedFiles []string
@@ -403,7 +403,7 @@ func handleLifecycleTurnEnd(ag agent.Agent, event *agent.Event) error {
 		updateAutoCommitTranscriptPosition(sessionID, newTranscriptPosition)
 	}
 
-	// Transition session phase and cleanup
+	// Transition session phase and cleanup pre-prompt state
 	transitionSessionTurnEnd(sessionID)
 	if cleanupErr := CleanupPrePromptState(sessionID); cleanupErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to cleanup pre-prompt state: %v\n", cleanupErr)
@@ -456,6 +456,11 @@ func handleLifecycleSessionEnd(ag agent.Agent, event *agent.Event) error {
 	if event.SessionID == "" {
 		return nil // No session to update
 	}
+
+	// Note: We intentionally don't clean up cached transcripts here.
+	// Post-session commits (carry-forward in ENDED phase) may still need
+	// the transcript to extract file changes. Cleanup is handled by
+	// `entire clean` or when the session state is fully removed.
 
 	if err := markSessionEnded(event.SessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to mark session ended: %v\n", err)
@@ -548,10 +553,10 @@ func handleLifecycleSubagentEnd(ag agent.Agent, event *agent.Event) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to compute file changes: %v\n", err)
 	}
 
-	// Get repo root and normalize paths
-	repoRoot, err := paths.RepoRoot()
+	// Get worktree root and normalize paths
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		return fmt.Errorf("failed to get repo root: %w", err)
+		return fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
 	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)

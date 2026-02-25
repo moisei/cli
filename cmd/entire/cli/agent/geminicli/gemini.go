@@ -3,14 +3,14 @@ package geminicli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -47,11 +47,13 @@ func (g *GeminiCLIAgent) Description() string {
 	return "Gemini CLI - Google's AI coding assistant"
 }
 
+func (g *GeminiCLIAgent) IsPreview() bool { return true }
+
 // DetectPresence checks if Gemini CLI is configured in the repository.
 func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
-	// Get repo root to check for .gemini directory
+	// Get worktree root to check for .gemini directory
 	// This is needed because the CLI may be run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Not in a git repo, fall back to CWD-relative check
 		repoRoot = "."
@@ -70,87 +72,6 @@ func (g *GeminiCLIAgent) DetectPresence() (bool, error) {
 	return false, nil
 }
 
-// GetHookConfigPath returns the path to Gemini's hook config file.
-func (g *GeminiCLIAgent) GetHookConfigPath() string {
-	return ".gemini/settings.json"
-}
-
-// SupportsHooks returns true as Gemini CLI supports lifecycle hooks.
-func (g *GeminiCLIAgent) SupportsHooks() bool {
-	return true
-}
-
-// ParseHookInput parses Gemini CLI hook input from stdin.
-func (g *GeminiCLIAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	input := &agent.HookInput{
-		HookType:  hookType,
-		Timestamp: time.Now(),
-		RawData:   make(map[string]interface{}),
-	}
-
-	// Parse based on hook type
-	switch hookType {
-	case agent.HookSessionStart, agent.HookSessionEnd, agent.HookStop:
-		var raw sessionInfoRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse session info: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		// Store Gemini-specific fields in RawData
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-		if raw.Source != "" {
-			input.RawData["source"] = raw.Source
-		}
-		if raw.Reason != "" {
-			input.RawData["reason"] = raw.Reason
-		}
-
-	case agent.HookUserPromptSubmit:
-		// BeforeAgent is Gemini's equivalent to Claude's UserPromptSubmit
-		// It provides the user's prompt in the "prompt" field
-		var raw agentHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse agent hook input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-		if raw.Prompt != "" {
-			input.UserPrompt = raw.Prompt
-			input.RawData["prompt"] = raw.Prompt
-		}
-
-	case agent.HookPreToolUse, agent.HookPostToolUse:
-		var raw toolHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse tool hook input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.ToolName = raw.ToolName
-		input.ToolInput = raw.ToolInput
-		if hookType == agent.HookPostToolUse {
-			input.ToolResponse = raw.ToolResponse
-		}
-		input.RawData["cwd"] = raw.Cwd
-		input.RawData["hook_event_name"] = raw.HookEventName
-	}
-
-	return input, nil
-}
-
 // GetSessionID extracts the session ID from hook input.
 func (g *GeminiCLIAgent) GetSessionID(input *agent.HookInput) string {
 	return input.SessionID
@@ -162,7 +83,7 @@ func (g *GeminiCLIAgent) ProtectedDirs() []string { return []string{".gemini"} }
 // ResolveSessionFile returns the path to a Gemini session file.
 // Gemini names files as session-<date>-<shortid>.json where shortid is the first 8 chars
 // of the session UUID. This searches for an existing file matching the pattern, falling
-// back to <dir>/<id>.json if no match is found.
+// back to constructing a filename matching Gemini's convention if no match is found.
 func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	// Try to find existing file matching Gemini's naming convention:
 	// session-*-<first8chars>.json
@@ -178,8 +99,9 @@ func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) s
 		return matches[len(matches)-1]
 	}
 
-	// Fallback: construct a default path
-	return filepath.Join(sessionDir, agentSessionID+".json")
+	// Fallback: construct filename matching Gemini's convention: session-<timestamp>-<id[:8]>.json
+	timestamp := time.Now().UTC().Format("2006-01-02T15-04")
+	return filepath.Join(sessionDir, "session-"+timestamp+"-"+shortID+".json")
 }
 
 // GetSessionDir returns the directory where Gemini stores session transcripts.
@@ -195,8 +117,8 @@ func (g *GeminiCLIAgent) GetSessionDir(repoPath string) (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Gemini uses a hash of the project path for the directory name
-	projectDir := SanitizePathForGemini(repoPath)
+	// Gemini uses a SHA256 hash of the project path for the directory name
+	projectDir := GetProjectHash(repoPath)
 	return filepath.Join(homeDir, ".gemini", "tmp", projectDir, "chats"), nil
 }
 
@@ -263,12 +185,11 @@ func (g *GeminiCLIAgent) FormatResumeCommand(sessionID string) string {
 	return "gemini --resume " + sessionID
 }
 
-// SanitizePathForGemini converts a path to Gemini's project directory format.
-// Gemini uses a hash-like sanitization similar to Claude.
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-func SanitizePathForGemini(path string) string {
-	return nonAlphanumericRegex.ReplaceAllString(path, "-")
+// GetProjectHash generates a unique hash for a project based on its root path.
+// This matches Gemini CLI's getProjectHash() which uses SHA256 of the project root.
+func GetProjectHash(projectRoot string) string {
+	hash := sha256.Sum256([]byte(projectRoot))
+	return hex.EncodeToString(hash[:])
 }
 
 // TranscriptAnalyzer interface implementation

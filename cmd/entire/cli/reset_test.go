@@ -29,7 +29,7 @@ func setupResetTestRepo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	}
 
 	t.Chdir(dir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create initial commit
 	emptyTree := &object.Tree{Entries: []object.TreeEntry{}}
@@ -212,7 +212,7 @@ func TestResetCmd_NotGitRepo(t *testing.T) {
 	// Create temp dir (not git repo)
 	dir := t.TempDir()
 	t.Chdir(dir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Run reset
 	cmd := newResetCmd()

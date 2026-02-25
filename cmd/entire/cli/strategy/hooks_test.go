@@ -24,7 +24,7 @@ func initHooksTestRepo(t *testing.T) (string, string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to init git repo: %v", err)
 	}
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	return tmpDir, filepath.Join(tmpDir, ".git", "hooks")
 }
@@ -272,9 +272,9 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 func TestInstallGitHook_WorktreeInstallsInCommonHooks(t *testing.T) {
 	mainRepo, worktreeDir := initHooksWorktreeRepo(t)
 	t.Chdir(worktreeDir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
-	count, err := InstallGitHook(true)
+	count, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() in worktree failed: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
 	// First install should install hooks
-	firstCount, err := InstallGitHook(true)
+	firstCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("First InstallGitHook() error = %v", err)
 	}
@@ -553,7 +553,7 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	}
 
 	// Second install should return 0 (all hooks already up to date)
-	secondCount, err := InstallGitHook(true)
+	secondCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("Second InstallGitHook() error = %v", err)
 	}
@@ -573,6 +573,56 @@ func TestInstallGitHook_Idempotent(t *testing.T) {
 	}
 }
 
+func TestInstallGitHook_LocalDevCommandPrefix(t *testing.T) {
+	_, hooksDir := initHooksTestRepo(t)
+
+	// Install with localDev=true
+	count, err := InstallGitHook(true, true)
+	if err != nil {
+		t.Fatalf("InstallGitHook(localDev=true) error = %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallGitHook(localDev=true) should install hooks")
+	}
+
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", hook, err)
+		}
+		content := string(data)
+		if !strings.Contains(content, "go run ./cmd/entire/main.go") {
+			t.Errorf("hook %s should use 'go run' prefix when localDev=true, got:\n%s", hook, content)
+		}
+		if strings.Contains(content, "\nentire ") {
+			t.Errorf("hook %s should not use bare 'entire' prefix when localDev=true", hook)
+		}
+	}
+
+	// Reinstall with localDev=false — hooks should update to use "entire" prefix
+	count, err = InstallGitHook(true, false)
+	if err != nil {
+		t.Fatalf("InstallGitHook(localDev=false) error = %v", err)
+	}
+	if count == 0 {
+		t.Fatal("InstallGitHook(localDev=false) should reinstall hooks (content changed)")
+	}
+
+	for _, hook := range gitHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, hook))
+		if err != nil {
+			t.Fatalf("hook %s should exist: %v", hook, err)
+		}
+		content := string(data)
+		if strings.Contains(content, "go run") {
+			t.Errorf("hook %s should not use 'go run' prefix when localDev=false, got:\n%s", hook, content)
+		}
+		if !strings.Contains(content, "\nentire ") {
+			t.Errorf("hook %s should use bare 'entire' prefix when localDev=false", hook)
+		}
+	}
+}
+
 func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 	ctx := context.Background()
@@ -584,7 +634,7 @@ func TestInstallGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
-	count, err := InstallGitHook(true)
+	count, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -628,7 +678,7 @@ func TestRemoveGitHook_CoreHooksPathRelative(t *testing.T) {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
-	installCount, err := InstallGitHook(true)
+	installCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -669,7 +719,7 @@ func TestRemoveGitHook_RemovesInstalledHooks(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	installCount, err := InstallGitHook(true)
+	installCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -750,7 +800,7 @@ func TestRemoveGitHook_NotAGitRepo(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Clear cache so paths resolve correctly
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Remove hooks in non-git directory - should return error
 	_, err := RemoveGitHook()
@@ -769,7 +819,7 @@ func TestInstallGitHook_BacksUpCustomHook(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	count, err := InstallGitHook(true)
+	count, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -821,7 +871,7 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 		t.Fatalf("failed to create second custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -857,7 +907,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	firstCount, err := InstallGitHook(true)
+	firstCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("first InstallGitHook() error = %v", err)
 	}
@@ -866,7 +916,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 	}
 
 	// Re-install should return 0 (idempotent)
-	secondCount, err := InstallGitHook(true)
+	secondCount, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("second InstallGitHook() error = %v", err)
 	}
@@ -878,7 +928,7 @@ func TestInstallGitHook_IdempotentWithChaining(t *testing.T) {
 func TestInstallGitHook_NoBackupWhenNoExistingHook(t *testing.T) {
 	_, hooksDir := initHooksTestRepo(t)
 
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -916,7 +966,7 @@ func TestInstallGitHook_MixedHooks(t *testing.T) {
 		}
 	}
 
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -965,7 +1015,7 @@ func TestRemoveGitHook_RestoresBackup(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1004,7 +1054,7 @@ func TestRemoveGitHook_RestoresBackupWhenHookAlreadyGone(t *testing.T) {
 		t.Fatalf("failed to create custom hook: %v", err)
 	}
 
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1080,7 +1130,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Install: should back up and chain
-	count, err := InstallGitHook(true)
+	count, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("first install error: %v", err)
 	}
@@ -1109,7 +1159,7 @@ func TestInstallGitHook_InstallRemoveReinstall(t *testing.T) {
 	}
 
 	// Reinstall: should back up again and chain
-	count, err = InstallGitHook(true)
+	count, err = InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("reinstall error: %v", err)
 	}
@@ -1142,7 +1192,7 @@ func TestRemoveGitHook_DoesNotOverwriteReplacedHook(t *testing.T) {
 	}
 
 	// entire enable: backs up A, installs our hook with chain
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}
@@ -1183,7 +1233,7 @@ func TestRemoveGitHook_PermissionDenied(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 
 	// Install hooks first
-	_, err := InstallGitHook(true)
+	_, err := InstallGitHook(true, false)
 	if err != nil {
 		t.Fatalf("InstallGitHook() error = %v", err)
 	}

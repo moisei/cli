@@ -59,31 +59,6 @@ type Checkpoint struct {
 	ToolUseID string
 }
 
-// PromptResponse represents a single user prompt and assistant response pair.
-type PromptResponse struct {
-	// Prompt is the user's message
-	Prompt string
-
-	// Response is the assistant's response
-	Response string
-
-	// Files is the list of files modified during this prompt/response
-	Files []string
-}
-
-// CheckpointDetails contains detailed information extracted from a checkpoint's transcript.
-// This is used by the explain command to display checkpoint content.
-type CheckpointDetails struct {
-	// Interactions contains all prompt/response pairs in this checkpoint.
-	// For strategies like auto-commit/commit, this typically has one entry.
-	// For strategies like shadow, this may have multiple entries.
-	Interactions []PromptResponse
-
-	// Files is the aggregate list of all files modified in this checkpoint.
-	// This is a convenience field that combines files from all interactions.
-	Files []string
-}
-
 // ListSessions returns all sessions from the entire/checkpoints/v1 branch,
 // plus any additional sessions from strategies implementing SessionSource.
 // It automatically discovers all registered strategies and merges their sessions.

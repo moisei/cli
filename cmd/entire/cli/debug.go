@@ -58,7 +58,7 @@ Without --transcript, shows git status changes instead.`,
 
 func runDebugAutoCommit(w io.Writer, transcriptPath string) error {
 	// Check if we're in a git repository
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		fmt.Fprintln(w, "Not in a git repository")
 		return nil //nolint:nilerr // not being in a git repo is expected, not an error for status check

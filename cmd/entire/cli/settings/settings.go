@@ -213,6 +213,32 @@ func applyDefaults(settings *EntireSettings) {
 	}
 }
 
+// IsSetUp returns true if Entire has been set up in the current repository.
+// This checks if .entire/settings.json exists.
+// Use this to avoid creating files/directories in repos where Entire was never enabled.
+func IsSetUp() bool {
+	settingsFileAbs, err := paths.AbsPath(EntireSettingsFile)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(settingsFileAbs)
+	return err == nil
+}
+
+// IsSetUpAndEnabled returns true if Entire is both set up and enabled.
+// This checks if .entire/settings.json exists AND has enabled: true.
+// Use this for hooks that should be no-ops when Entire is not active.
+func IsSetUpAndEnabled() bool {
+	if !IsSetUp() {
+		return false
+	}
+	s, err := Load()
+	if err != nil {
+		return false
+	}
+	return s.Enabled
+}
+
 // IsSummarizeEnabled checks if auto-summarize is enabled in settings.
 // Returns false by default if settings cannot be loaded or the key is missing.
 func IsSummarizeEnabled() bool {

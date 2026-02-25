@@ -476,7 +476,7 @@ func (s *AutoCommitStrategy) EnsureSetup() error {
 
 	// Install generic hooks if missing (they delegate to strategy at runtime)
 	if !IsGitHookInstalled() {
-		if _, err := InstallGitHook(true); err != nil {
+		if _, err := InstallGitHook(true, isLocalDev()); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
 	}

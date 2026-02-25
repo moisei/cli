@@ -1,7 +1,6 @@
 package geminicli
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,9 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
-
-// Test constants
-const testSessionID = "abc123"
 
 func TestNewGeminiCLIAgent(t *testing.T) {
 	ag := NewGeminiCLIAgent()
@@ -80,141 +76,6 @@ func TestDetectPresence(t *testing.T) {
 	})
 }
 
-func TestGetHookConfigPath(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-	path := ag.GetHookConfigPath()
-	if path != ".gemini/settings.json" {
-		t.Errorf("GetHookConfigPath() = %q, want .gemini/settings.json", path)
-	}
-}
-
-func TestSupportsHooks(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-	if !ag.SupportsHooks() {
-		t.Error("SupportsHooks() = false, want true")
-	}
-}
-
-func TestParseHookInput_SessionStart(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	input := `{
-		"session_id": "` + testSessionID + `",
-		"transcript_path": "/path/to/transcript.json",
-		"cwd": "/project",
-		"hook_event_name": "session_start",
-		"source": "startup"
-	}`
-
-	hookInput, err := ag.ParseHookInput(agent.HookSessionStart, bytes.NewReader([]byte(input)))
-	if err != nil {
-		t.Fatalf("ParseHookInput() error = %v", err)
-	}
-
-	if hookInput.SessionID != testSessionID {
-		t.Errorf("SessionID = %q, want %s", hookInput.SessionID, testSessionID)
-	}
-	if hookInput.SessionRef != "/path/to/transcript.json" {
-		t.Errorf("SessionRef = %q, want /path/to/transcript.json", hookInput.SessionRef)
-	}
-	if hookInput.HookType != agent.HookSessionStart {
-		t.Errorf("HookType = %v, want %v", hookInput.HookType, agent.HookSessionStart)
-	}
-}
-
-func TestParseHookInput_SessionEnd(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	input := `{
-		"session_id": "` + testSessionID + `",
-		"transcript_path": "/path/to/transcript.json",
-		"cwd": "/project",
-		"hook_event_name": "session_end",
-		"reason": "exit"
-	}`
-
-	hookInput, err := ag.ParseHookInput(agent.HookStop, bytes.NewReader([]byte(input)))
-	if err != nil {
-		t.Fatalf("ParseHookInput() error = %v", err)
-	}
-
-	if hookInput.SessionID != testSessionID {
-		t.Errorf("SessionID = %q, want %s", hookInput.SessionID, testSessionID)
-	}
-	if hookInput.RawData["reason"] != "exit" {
-		t.Errorf("reason = %v, want exit", hookInput.RawData["reason"])
-	}
-}
-
-func TestParseHookInput_PreToolUse(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	input := `{
-		"session_id": "` + testSessionID + `",
-		"transcript_path": "/path/to/transcript.json",
-		"cwd": "/project",
-		"hook_event_name": "before_tool",
-		"tool_name": "write_file",
-		"tool_input": {"file_path": "test.go", "content": "package main"}
-	}`
-
-	hookInput, err := ag.ParseHookInput(agent.HookPreToolUse, bytes.NewReader([]byte(input)))
-	if err != nil {
-		t.Fatalf("ParseHookInput() error = %v", err)
-	}
-
-	if hookInput.ToolName != "write_file" {
-		t.Errorf("ToolName = %q, want write_file", hookInput.ToolName)
-	}
-	if hookInput.ToolInput == nil {
-		t.Error("ToolInput is nil")
-	}
-}
-
-func TestParseHookInput_PostToolUse(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	input := `{
-		"session_id": "` + testSessionID + `",
-		"transcript_path": "/path/to/transcript.json",
-		"cwd": "/project",
-		"hook_event_name": "after_tool",
-		"tool_name": "write_file",
-		"tool_input": {"file_path": "test.go"},
-		"tool_response": {"success": true}
-	}`
-
-	hookInput, err := ag.ParseHookInput(agent.HookPostToolUse, bytes.NewReader([]byte(input)))
-	if err != nil {
-		t.Fatalf("ParseHookInput() error = %v", err)
-	}
-
-	if hookInput.ToolName != "write_file" {
-		t.Errorf("ToolName = %q, want write_file", hookInput.ToolName)
-	}
-	if hookInput.ToolResponse == nil {
-		t.Error("ToolResponse is nil")
-	}
-}
-
-func TestParseHookInput_Empty(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	_, err := ag.ParseHookInput(agent.HookSessionStart, bytes.NewReader([]byte("")))
-	if err == nil {
-		t.Error("ParseHookInput() should error on empty input")
-	}
-}
-
-func TestParseHookInput_InvalidJSON(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-
-	_, err := ag.ParseHookInput(agent.HookSessionStart, bytes.NewReader([]byte("not json")))
-	if err == nil {
-		t.Error("ParseHookInput() should error on invalid JSON")
-	}
-}
-
 func TestGetSessionID(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 	input := &agent.HookInput{SessionID: "test-session-123"}
@@ -245,15 +106,21 @@ func TestResolveSessionFile(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to default when no match", func(t *testing.T) {
+	t.Run("falls back to Gemini-style filename when no match", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
 		ag := &GeminiCLIAgent{}
 
 		result := ag.ResolveSessionFile(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8")
-		expected := filepath.Join(tmpDir, "0544a0f5-46a6-41b3-a89c-e7804df731b8.json")
-		if result != expected {
-			t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
+		filename := filepath.Base(result)
+		if !strings.HasPrefix(filename, "session-") {
+			t.Errorf("fallback filename %q should start with 'session-'", filename)
+		}
+		if !strings.HasSuffix(filename, "-0544a0f5.json") {
+			t.Errorf("fallback filename %q should end with '-0544a0f5.json'", filename)
+		}
+		if filepath.Dir(result) != tmpDir {
+			t.Errorf("fallback dir = %q, want %q", filepath.Dir(result), tmpDir)
 		}
 	})
 
@@ -262,11 +129,14 @@ func TestResolveSessionFile(t *testing.T) {
 		tmpDir := t.TempDir()
 		ag := &GeminiCLIAgent{}
 
-		// Short ID (less than 8 chars) should use entire ID as prefix
+		// Short ID (less than 8 chars) should use entire ID in filename
 		result := ag.ResolveSessionFile(tmpDir, "abc123")
-		expected := filepath.Join(tmpDir, "abc123.json")
-		if result != expected {
-			t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
+		filename := filepath.Base(result)
+		if !strings.HasPrefix(filename, "session-") {
+			t.Errorf("fallback filename %q should start with 'session-'", filename)
+		}
+		if !strings.HasSuffix(filename, "-abc123.json") {
+			t.Errorf("fallback filename %q should end with '-abc123.json'", filename)
 		}
 	})
 }
@@ -441,45 +311,25 @@ func TestWriteSession_NoNativeData(t *testing.T) {
 	}
 }
 
-func TestSanitizePathForGemini(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"/Users/test/project", "-Users-test-project"},
-		{"simple", "simple"},
-		{"/path/with spaces/dir", "-path-with-spaces-dir"},
+func TestGetProjectHash(t *testing.T) {
+	t.Parallel()
+
+	// GetProjectHash should return a consistent SHA256 hex string for a given path
+	hash1 := GetProjectHash("/Users/test/project")
+	hash2 := GetProjectHash("/Users/test/project")
+	if hash1 != hash2 {
+		t.Errorf("GetProjectHash should be deterministic: got %q and %q", hash1, hash2)
 	}
 
-	for _, tt := range tests {
-		got := SanitizePathForGemini(tt.input)
-		if got != tt.want {
-			t.Errorf("SanitizePathForGemini(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
-func TestGetSupportedHooks(t *testing.T) {
-	ag := &GeminiCLIAgent{}
-	hooks := ag.GetSupportedHooks()
-
-	expected := []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,       // Maps to Gemini's SessionEnd (explicit exit/logout)
-		agent.HookStop,             // Maps to Gemini's AfterAgent (end of response)
-		agent.HookUserPromptSubmit, // Maps to Gemini's BeforeAgent
-		agent.HookPreToolUse,       // Maps to Gemini's BeforeTool
-		agent.HookPostToolUse,      // Maps to Gemini's AfterTool
+	// Should be a 64-char hex string (SHA256)
+	if len(hash1) != 64 {
+		t.Errorf("GetProjectHash should return 64-char hex string, got %d chars: %q", len(hash1), hash1)
 	}
 
-	if len(hooks) != len(expected) {
-		t.Errorf("GetSupportedHooks() returned %d hooks, want %d", len(hooks), len(expected))
-	}
-
-	for i, hook := range expected {
-		if hooks[i] != hook {
-			t.Errorf("GetSupportedHooks()[%d] = %v, want %v", i, hooks[i], hook)
-		}
+	// Different paths should produce different hashes
+	hash3 := GetProjectHash("/Users/test/other")
+	if hash1 == hash3 {
+		t.Errorf("GetProjectHash should return different hashes for different paths")
 	}
 }
 

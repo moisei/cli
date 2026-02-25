@@ -11,12 +11,10 @@ import (
 // Each agent implementation (Claude Code, Cursor, Aider, etc.) converts its
 // native format to the normalized types defined in this package.
 //
-// The interface is organized into four groups:
-//
+// The interface is organized into three groups:
 //   - Identity (5 methods): Name, Type, Description, DetectPresence, ProtectedDirs
-//   - Event Mapping (2 methods): HookNames, ParseHookEvent
 //   - Transcript Storage (3 methods): ReadTranscript, ChunkTranscript, ReassembleTranscript
-//   - Legacy (8 methods): Will be moved to optional interfaces or removed in a future phase
+//   - Legacy (6 methods): Will be moved to optional interfaces or removed in a future phase
 type Agent interface {
 	// --- Identity ---
 
@@ -30,6 +28,9 @@ type Agent interface {
 	// Description returns a human-readable description for UI
 	Description() string
 
+	// IsPreview returns whether the agent integration is in preview or stable
+	IsPreview() bool
+
 	// DetectPresence checks if this agent is configured in the repository
 	DetectPresence() (bool, error)
 
@@ -37,18 +38,6 @@ type Agent interface {
 	// modified or deleted during rewind or other destructive operations.
 	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
 	ProtectedDirs() []string
-
-	// --- Event Mapping ---
-
-	// HookNames returns the hook verbs this agent supports.
-	// These become subcommands under `entire hooks <agent>`.
-	// e.g., ["stop", "user-prompt-submit", "session-start", "session-end"]
-	HookNames() []string
-
-	// ParseHookEvent translates an agent-native hook into a normalized lifecycle Event.
-	// Returns nil if the hook has no lifecycle significance (e.g., pass-through hooks).
-	// This is the core contribution surface for new agent implementations.
-	ParseHookEvent(hookName string, stdin io.Reader) (*Event, error)
 
 	// --- Transcript Storage ---
 
@@ -65,15 +54,6 @@ type Agent interface {
 	ReassembleTranscript(chunks [][]byte) ([]byte, error)
 
 	// --- Legacy methods (will move to optional interfaces in Phase 4) ---
-
-	// GetHookConfigPath returns path to hook config file (empty if none).
-	GetHookConfigPath() string
-
-	// SupportsHooks returns true if agent supports lifecycle hooks.
-	SupportsHooks() bool
-
-	// ParseHookInput parses hook callback input from stdin.
-	ParseHookInput(hookType HookType, reader io.Reader) (*HookInput, error)
 
 	// GetSessionID extracts session ID from hook input.
 	GetSessionID(input *HookInput) string
@@ -97,8 +77,22 @@ type Agent interface {
 // HookSupport is implemented by agents with lifecycle hooks.
 // This optional interface allows agents like Claude Code and Cursor to
 // install and manage hooks that notify Entire of agent events.
+//
+// The interface is organized into two groups:
+//   - Hook Mapping (2 methods): HookNames, ParseHookEvent
+//   - Hook Management (3 methods): InstallHooks, UninstallHooks, AreHooksInstalled
 type HookSupport interface {
 	Agent
+
+	// HookNames returns the hook verbs this agent supports.
+	// These become subcommands under `entire hooks <agent>`.
+	// e.g., ["stop", "user-prompt-submit", "session-start", "session-end"]
+	HookNames() []string
+
+	// ParseHookEvent translates an agent-native hook into a normalized lifecycle Event.
+	// Returns nil if the hook has no lifecycle significance (e.g., pass-through hooks).
+	// This is the core contribution surface for new agent implementations.
+	ParseHookEvent(hookName string, stdin io.Reader) (*Event, error)
 
 	// InstallHooks installs agent-specific hooks.
 	// If localDev is true, hooks point to local development build.
@@ -111,19 +105,6 @@ type HookSupport interface {
 
 	// AreHooksInstalled checks if hooks are currently installed
 	AreHooksInstalled() bool
-
-	// GetSupportedHooks returns the hook types this agent supports
-	GetSupportedHooks() []HookType
-}
-
-// HookHandler is implemented by agents that define their own hook vocabulary.
-// HookNames() is now part of the core Agent interface.
-// This interface is kept for backward compatibility during migration.
-type HookHandler interface {
-	Agent
-
-	// GetHookNames returns the hook verbs this agent supports.
-	GetHookNames() []string
 }
 
 // FileWatcher is implemented by agents that use file-based detection.

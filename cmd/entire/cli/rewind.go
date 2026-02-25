@@ -680,7 +680,23 @@ func restoreSessionTranscriptFromStrategy(cpID id.CheckpointID, sessionID string
 		sessionID = returnedSessionID
 	}
 
-	return writeTranscriptToAgentSession(content, sessionID, agent)
+	sessionFile, err := resolveTranscriptPath(sessionID, agent)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
+		return "", fmt.Errorf("failed to create agent session directory: %w", err)
+	}
+	agentSession := &agentpkg.AgentSession{
+		SessionID:  sessionID,
+		AgentName:  agent.Name(),
+		SessionRef: sessionFile,
+		NativeData: content,
+	}
+	if err := agent.WriteSession(agentSession); err != nil {
+		return "", fmt.Errorf("failed to write session: %w", err)
+	}
+	return sessionID, nil
 }
 
 // restoreSessionTranscriptFromShadow restores a session transcript from a shadow branch commit.
@@ -705,43 +721,23 @@ func restoreSessionTranscriptFromShadow(commitHash, metadataDir, sessionID strin
 		return "", fmt.Errorf("failed to get transcript from shadow branch: %w", err)
 	}
 
-	return writeTranscriptToAgentSession(content, sessionID, agent)
-}
-
-// writeTranscriptToAgentSession writes transcript content to the agent's session storage.
-func writeTranscriptToAgentSession(content []byte, sessionID string, agent agentpkg.Agent) (string, error) {
 	sessionFile, err := resolveTranscriptPath(sessionID, agent)
 	if err != nil {
 		return "", err
 	}
-
-	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return "", fmt.Errorf("failed to create agent session directory: %w", err)
 	}
-
-	fmt.Fprintf(os.Stderr, "Writing transcript to: %s\n", sessionFile)
-	if err := os.WriteFile(sessionFile, content, 0o600); err != nil {
-		return "", fmt.Errorf("failed to write transcript: %w", err)
+	agentSession := &agentpkg.AgentSession{
+		SessionID:  sessionID,
+		AgentName:  agent.Name(),
+		SessionRef: sessionFile,
+		NativeData: content,
 	}
-
+	if err := agent.WriteSession(agentSession); err != nil {
+		return "", fmt.Errorf("failed to write session: %w", err)
+	}
 	return sessionID, nil
-}
-
-// resolveTranscriptPath determines the correct file path for an agent's session transcript.
-// Delegates to strategy.ResolveSessionFilePath after computing the fallback session directory.
-func resolveTranscriptPath(sessionID string, agent agentpkg.Agent) (string, error) {
-	repoRoot, err := paths.RepoRoot()
-	if err != nil {
-		return "", fmt.Errorf("failed to get repository root: %w", err)
-	}
-
-	agentSessionDir, err := agent.GetSessionDir(repoRoot)
-	if err != nil {
-		return "", fmt.Errorf("failed to get agent session directory: %w", err)
-	}
-
-	return strategy.ResolveSessionFilePath(sessionID, agent, agentSessionDir), nil
 }
 
 // restoreTaskCheckpointTranscript restores a truncated transcript for a task checkpoint.
@@ -1156,6 +1152,9 @@ func countCommitsBetween(repo *git.Repository, ancestor, descendant plumbing.Has
 // Uses the git CLI instead of go-git because go-git's HardReset incorrectly
 // deletes untracked directories (like .entire/) even when they're in .gitignore.
 func performGitResetHard(commitHash string) error {
+	if strings.HasPrefix(commitHash, "-") {
+		return fmt.Errorf("reset failed: invalid commit hash %q", commitHash)
+	}
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "git", "reset", "--hard", commitHash)
 	if output, err := cmd.CombinedOutput(); err != nil {

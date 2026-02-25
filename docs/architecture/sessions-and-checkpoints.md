@@ -2,7 +2,7 @@
 
 ## Overview
 
-Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Cursor, Copilot, or any tool that triggers Entire hooks.
+Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Gemini CLI, OpenCode, or any tool that triggers Entire hooks.
 
 ## Domain Model
 

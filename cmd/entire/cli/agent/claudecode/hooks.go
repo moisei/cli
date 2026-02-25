@@ -13,11 +13,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure ClaudeCodeAgent implements HookSupport and HookHandler
-var (
-	_ agent.HookSupport = (*ClaudeCodeAgent)(nil)
-	_ agent.HookHandler = (*ClaudeCodeAgent)(nil)
-)
+// Ensure ClaudeCodeAgent implements HookSupport
+var _ agent.HookSupport = (*ClaudeCodeAgent)(nil)
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
 const (
@@ -37,20 +34,6 @@ const ClaudeSettingsFileName = "settings.json"
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// GetHookNames returns the hook verbs Claude Code supports.
-// These become subcommands: entire hooks claude-code <verb>
-func (c *ClaudeCodeAgent) GetHookNames() []string {
-	return []string{
-		HookNameSessionStart,
-		HookNameSessionEnd,
-		HookNameStop,
-		HookNameUserPromptSubmit,
-		HookNamePreTask,
-		HookNamePostTask,
-		HookNamePostTodo,
-	}
-}
-
 // entireHookPrefixes are command prefixes that identify Entire hooks (both old and new formats)
 var entireHookPrefixes = []string{
 	"entire ",
@@ -63,10 +46,10 @@ var entireHookPrefixes = []string{
 func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when RepoRoot() fails (tests run outside git repos)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get current directory: %w", err)
 		}
@@ -83,7 +66,7 @@ func (c *ClaudeCodeAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	// rawPermissions preserves unknown permission fields (e.g., "ask")
 	var rawPermissions map[string]json.RawMessage
 
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from cwd + fixed path
+	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + settings file name
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
@@ -267,7 +250,7 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks() error {
 	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
@@ -386,7 +369,7 @@ func (c *ClaudeCodeAgent) UninstallHooks() error {
 // AreHooksInstalled checks if Entire hooks are installed.
 func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
@@ -409,18 +392,6 @@ func (c *ClaudeCodeAgent) AreHooksInstalled() bool {
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go hooks claudecode stop") ||
 		hookCommandExists(settings.Hooks.Stop, "entire rewind claude-hook --stop") ||
 		hookCommandExists(settings.Hooks.Stop, "go run ${CLAUDE_PROJECT_DIR}/cmd/entire/main.go rewind claude-hook --stop")
-}
-
-// GetSupportedHooks returns the hook types Claude Code supports.
-func (c *ClaudeCodeAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,
-		agent.HookUserPromptSubmit,
-		agent.HookStop,
-		agent.HookPreToolUse,
-		agent.HookPostToolUse,
-	}
 }
 
 // Helper functions for hook management

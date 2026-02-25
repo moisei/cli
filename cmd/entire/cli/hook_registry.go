@@ -44,9 +44,9 @@ func GetCurrentHookAgent() (agent.Agent, error) {
 	return ag, nil
 }
 
-// newAgentHooksCmd creates a hooks subcommand for an agent that implements HookHandler.
+// newAgentHooksCmd creates a hooks subcommand for an agent that implements HookSupport.
 // It dynamically creates subcommands for each hook the agent supports.
-func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookHandler) *cobra.Command {
+func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookSupport) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
@@ -63,7 +63,7 @@ func newAgentHooksCmd(agentName agent.AgentName, handler agent.HookHandler) *cob
 		},
 	}
 
-	for _, hookName := range handler.GetHookNames() {
+	for _, hookName := range handler.HookNames() {
 		cmd.AddCommand(newAgentHookVerbCmdWithLogging(agentName, hookName))
 	}
 
@@ -95,7 +95,7 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 		Short:  "Called on " + hookName,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
-			if _, err := paths.RepoRoot(); err != nil {
+			if _, err := paths.WorktreeRoot(); err != nil {
 				return nil
 			}
 
@@ -132,8 +132,13 @@ func newAgentHookVerbCmdWithLogging(agentName agent.AgentName, hookName string) 
 				return fmt.Errorf("failed to get agent %q: %w", agentName, agentErr)
 			}
 
+			handler, ok := ag.(agent.HookSupport)
+			if !ok {
+				return fmt.Errorf("agent %q does not support hooks", agentName)
+			}
+
 			// Use cmd.InOrStdin() to support testing with cmd.SetIn()
-			event, parseErr := ag.ParseHookEvent(hookName, cmd.InOrStdin())
+			event, parseErr := handler.ParseHookEvent(hookName, cmd.InOrStdin())
 			if parseErr != nil {
 				return fmt.Errorf("failed to parse hook event: %w", parseErr)
 			}

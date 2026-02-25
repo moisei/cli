@@ -218,7 +218,7 @@ func isProtectedPath(relPath string) bool {
 
 // protectedDirs returns the list of directories to protect. This combines
 // static infrastructure dirs with agent-reported dirs from the registry.
-// The result is cached via sync.Once since it's called per-file during filepath.Walk.
+// The result is cached via sync.Once since it's called per-file when filtering untracked files.
 //
 // NOTE: The cache is never invalidated. In production this is fine (the agent registry
 // is populated at init time and never changes). However, tests that mutate the agent
@@ -237,24 +237,6 @@ var (
 	protectedDirsOnce  sync.Once
 	protectedDirsCache []string
 )
-
-// homeRelativePath strips the $HOME/ prefix from an absolute path,
-// returning a home-relative path suitable for persisting in metadata.
-// Returns "" if the path is empty or not under $HOME.
-func homeRelativePath(absPath string) string {
-	if absPath == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	prefix := home + string(filepath.Separator)
-	if !strings.HasPrefix(absPath, prefix) {
-		return ""
-	}
-	return absPath[len(prefix):]
-}
 
 // isSpecificAgentType returns true if the agent type is a known, specific value
 // (not empty and not the generic "Agent" fallback).
@@ -483,14 +465,20 @@ func ReadAgentTypeFromTree(tree *object.Tree, checkpointPath string) agent.Agent
 		}
 	}
 
-	// Fall back to detecting agent from config files (shadow branches don't have metadata.json)
-	// Check for Gemini config
+	// Fall back to detecting agent from config files (shadow branches don't have metadata.json).
+	// Order: Gemini (most specific check), Claude (established default), OpenCode (newest/preview).
 	if _, err := tree.File(".gemini/settings.json"); err == nil {
 		return agent.AgentTypeGemini
 	}
-	// Check for Claude config (either settings.local.json or settings.json in .claude/)
 	if _, err := tree.Tree(".claude"); err == nil {
 		return agent.AgentTypeClaudeCode
+	}
+	// OpenCode: .opencode directory or opencode.json config
+	if _, err := tree.Tree(".opencode"); err == nil {
+		return agent.AgentTypeOpenCode
+	}
+	if _, err := tree.File("opencode.json"); err == nil {
+		return agent.AgentTypeOpenCode
 	}
 
 	return agent.AgentTypeUnknown
@@ -534,31 +522,6 @@ func ReadAllSessionPromptsFromTree(tree *object.Tree, checkpointPath string, ses
 	return prompts
 }
 
-// ReadSessionPromptFromShadow reads the first prompt for a session from the shadow branch.
-// Returns an empty string if the prompt cannot be read.
-func ReadSessionPromptFromShadow(repo *git.Repository, baseCommit, worktreeID, sessionID string) string {
-	// Get shadow branch for this base commit using worktree-specific naming
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(baseCommit, worktreeID)
-	ref, err := repo.Reference(plumbing.NewBranchReferenceName(shadowBranchName), true)
-	if err != nil {
-		return ""
-	}
-
-	commit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return ""
-	}
-
-	tree, err := commit.Tree()
-	if err != nil {
-		return ""
-	}
-
-	// Build the path to prompt.txt: .entire/metadata/<session-id>/prompt.txt
-	checkpointPath := paths.EntireMetadataDir + "/" + sessionID
-	return ReadSessionPromptFromTree(tree, checkpointPath)
-}
-
 // GetRemoteMetadataBranchTree returns the tree object for origin/entire/checkpoints/v1.
 func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 	refName := plumbing.NewRemoteReferenceName("origin", paths.MetadataBranchName)
@@ -595,9 +558,7 @@ func GetRemoteMetadataBranchTree(repo *git.Repository) (*object.Tree, error) {
 // The function first uses 'git rev-parse --show-toplevel' to find the repository
 // root, which works correctly even when called from a subdirectory within the repo.
 func OpenRepository() (*git.Repository, error) {
-	// First, find the repository root using git rev-parse --show-toplevel
-	// This works correctly from any subdirectory within the repository
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Fallback to current directory if git command fails
 		// (e.g., if git is not installed or we're not in a repo)
@@ -619,7 +580,7 @@ func OpenRepository() (*git.Repository, error) {
 // This function works correctly from any subdirectory within the repository.
 func IsInsideWorktree() bool {
 	// First find the repository root
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		return false
 	}
@@ -642,7 +603,7 @@ func IsInsideWorktree() bool {
 // See: https://git-scm.com/docs/gitrepository-layout
 func GetMainRepoRoot() (string, error) {
 	// First find the worktree/repo root
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		return "", fmt.Errorf("failed to get worktree path: %w", err)
 	}
@@ -691,18 +652,6 @@ func GetGitCommonDir() (string, error) {
 	}
 
 	return filepath.Clean(commonDir), nil
-}
-
-// GetWorktreePath returns the absolute path to the current worktree root.
-// This is the working directory path, not the git directory.
-func GetWorktreePath() (string, error) {
-	ctx := context.Background()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get worktree path: %w", err)
-	}
-	return strings.TrimSpace(string(output)), nil
 }
 
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
@@ -872,9 +821,9 @@ func checkCanRewindWithWarning() (bool, string, error) {
 
 	var changes []fileChange
 	// Use repo root, not cwd - git status returns paths relative to repo root
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		return true, "", nil //nolint:nilerr // Rewind allowed even if repo root lookup fails
+		return true, "", nil //nolint:nilerr // Rewind allowed even if worktree root lookup fails
 	}
 
 	for file, st := range status {
@@ -1060,7 +1009,7 @@ const (
 // The stageCtx parameter is used for user-facing messages to indicate whether
 // this is staging for a session checkpoint or a task checkpoint.
 func StageFiles(worktree *git.Worktree, modified, newFiles, deleted []string, stageCtx StageFilesContext) {
-	// Get repo root for resolving file paths
+	// Get worktree root for resolving file paths
 	// This is critical because fileExists() uses os.Stat() which resolves relative to CWD,
 	// but worktree.Add/Remove resolve relative to repo root. If CWD != repo root,
 	// fileExists() could return false for existing files, causing worktree.Remove()
@@ -1262,51 +1211,42 @@ func HardResetWithProtection(commitHash plumbing.Hash) (shortID string, err erro
 	return shortID, nil
 }
 
-// collectUntrackedFiles collects all untracked files in the working directory.
-// This is used to capture the initial state when starting a session,
-// ensuring untracked files present at session start are preserved during rewind.
-// Excludes protected directories (.git/, .entire/, and agent config directories).
-// Works correctly from any subdirectory within the repository.
+// collectUntrackedFiles collects untracked files in the working directory that are
+// NOT ignored by .gitignore. This is used to capture the initial state when starting
+// a session, ensuring untracked files present at session start are preserved during rewind.
+// Uses "git ls-files --others --exclude-standard -z" to respect .gitignore rules,
+// avoiding bloated session state from large ignored directories like node_modules/.
+// Returns paths relative to the repository root.
 func collectUntrackedFiles() ([]string, error) {
-	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		repoRoot = "." // Fallback to current directory
+		repoRoot = "."
 	}
 
-	var untrackedFiles []string
-	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil //nolint:nilerr // Skip filesystem errors during walk
-		}
-
-		// Get path relative to repo root
-		relPath, err := filepath.Rel(repoRoot, path)
-		if err != nil {
-			return nil //nolint:nilerr // Skip paths we can't make relative
-		}
-
-		// Skip directories
-		if info.IsDir() {
-			if isProtectedPath(relPath) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Skip files in protected directories (shouldn't reach here due to SkipDir, but safety check)
-		if isProtectedPath(relPath) {
-			return nil
-		}
-
-		untrackedFiles = append(untrackedFiles, relPath)
-		return nil
-	})
+	cmd := exec.CommandContext(context.Background(), "git", "ls-files", "--others", "--exclude-standard", "-z")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory: %w", err)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("git ls-files failed: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
+		}
+		return nil, fmt.Errorf("git ls-files failed: %w", err)
 	}
 
-	return untrackedFiles, nil
+	raw := string(output)
+	if raw == "" {
+		return nil, nil
+	}
+
+	var files []string
+	for _, f := range strings.Split(raw, "\x00") {
+		// Defense-in-depth: filter protected paths even though --exclude-standard should already handle them
+		if f != "" && !isProtectedPath(f) {
+			files = append(files, f)
+		}
+	}
+	return files, nil
 }
 
 // ExtractSessionIDFromCommit extracts the session ID from a commit's trailers.
@@ -1539,4 +1479,23 @@ func IsOnDefaultBranch(repo *git.Repository) (bool, string) {
 	}
 
 	return currentBranch == defaultBranch, currentBranch
+}
+
+// prepareTranscriptIfNeeded calls PrepareTranscript for agents that implement
+// the TranscriptPreparer interface. This ensures transcript files exist before
+// they are read (e.g., OpenCode creates its transcript lazily via `opencode export`).
+// Errors are silently ignored — this is best-effort for hook paths.
+func prepareTranscriptIfNeeded(agentType agent.AgentType, transcriptPath string) {
+	if transcriptPath == "" {
+		return
+	}
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		return
+	}
+	if preparer, ok := ag.(agent.TranscriptPreparer); ok {
+		// Best-effort: callers handle missing files gracefully.
+		// Transcript may not be available yet (e.g., agent not installed).
+		_ = preparer.PrepareTranscript(transcriptPath) //nolint:errcheck // Best-effort in hook path
+	}
 }

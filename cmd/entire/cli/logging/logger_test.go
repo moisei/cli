@@ -59,7 +59,7 @@ func TestInit_CreatesLogDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo so RepoRoot works
+	// Initialize git repo so WorktreeRoot works
 	initGitRepo(t, tmpDir)
 
 	err := Init(testSessionID)

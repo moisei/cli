@@ -19,6 +19,9 @@ const AgentNameClaudeCode = "claude-code"
 // AgentNameGemini is the name for Gemini CLI agent.
 const AgentNameGemini = "gemini"
 
+// AgentNameOpenCode is the name for OpenCode agent.
+const AgentNameOpenCode = "opencode"
+
 // AgentRunner abstracts invoking a coding agent for e2e tests.
 // This follows the multi-agent pattern from cmd/entire/cli/agent/agent.go.
 type AgentRunner interface {
@@ -58,6 +61,8 @@ func NewAgentRunner(name string, config AgentRunnerConfig) AgentRunner {
 		return NewClaudeCodeRunner(config)
 	case AgentNameGemini:
 		return NewGeminiCLIRunner(config)
+	case AgentNameOpenCode:
+		return NewOpenCodeRunner(config)
 	default:
 		// Return a runner that reports as unavailable
 		return &unavailableRunner{name: name}
@@ -294,6 +299,112 @@ func (r *GeminiCLIRunner) RunPromptWithTools(ctx context.Context, workDir string
 
 	//nolint:gosec // args are constructed from trusted config, not user input
 	cmd := exec.CommandContext(ctx, "gemini", args...)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	err := cmd.Run()
+	duration := time.Since(start)
+
+	result := &AgentResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		Duration: duration,
+	}
+
+	if err != nil {
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+		//nolint:wrapcheck // error is from exec.Run, caller can check ExitCode in result
+		return result, err
+	}
+
+	result.ExitCode = 0
+	return result, nil
+}
+
+// OpenCodeRunner implements AgentRunner for OpenCode.
+// See: https://opencode.ai/docs/cli/
+type OpenCodeRunner struct {
+	Model   string
+	Timeout time.Duration
+}
+
+// NewOpenCodeRunner creates a new OpenCode runner with the given config.
+func NewOpenCodeRunner(config AgentRunnerConfig) *OpenCodeRunner {
+	model := config.Model
+	if model == "" {
+		model = os.Getenv("E2E_OPENCODE_MODEL")
+		if model == "" {
+			model = "anthropic/claude-haiku-4-5"
+		}
+	}
+
+	timeout := config.Timeout
+	if timeout == 0 {
+		if envTimeout := os.Getenv("E2E_TIMEOUT"); envTimeout != "" {
+			if parsed, err := time.ParseDuration(envTimeout); err == nil {
+				timeout = parsed
+			}
+		}
+		if timeout == 0 {
+			timeout = 2 * time.Minute
+		}
+	}
+
+	return &OpenCodeRunner{
+		Model:   model,
+		Timeout: timeout,
+	}
+}
+
+func (r *OpenCodeRunner) Name() string {
+	return AgentNameOpenCode
+}
+
+// IsAvailable checks if OpenCode CLI is installed and responds to --version.
+func (r *OpenCodeRunner) IsAvailable() (bool, error) {
+	if _, err := exec.LookPath("opencode"); err != nil {
+		return false, fmt.Errorf("opencode CLI not found in PATH: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "opencode", "--version")
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("opencode CLI not working: %w", err)
+	}
+
+	return true, nil
+}
+
+func (r *OpenCodeRunner) RunPrompt(ctx context.Context, workDir string, prompt string) (*AgentResult, error) {
+	return r.RunPromptWithTools(ctx, workDir, prompt, nil)
+}
+
+func (r *OpenCodeRunner) RunPromptWithTools(ctx context.Context, workDir string, prompt string, _ []string) (*AgentResult, error) {
+	// Build command: opencode run "<prompt>"
+	// In non-interactive mode, all permissions are auto-approved.
+	args := []string{"run"}
+
+	if r.Model != "" {
+		args = append(args, "--model", r.Model)
+	}
+
+	args = append(args, prompt)
+
+	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer

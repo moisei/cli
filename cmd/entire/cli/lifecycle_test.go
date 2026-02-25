@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,22 +28,10 @@ var _ agent.Agent = (*mockLifecycleAgent)(nil)
 func (m *mockLifecycleAgent) Name() agent.AgentName                  { return m.name }
 func (m *mockLifecycleAgent) Type() agent.AgentType                  { return m.agentType }
 func (m *mockLifecycleAgent) Description() string                    { return "Mock agent for lifecycle tests" }
+func (m *mockLifecycleAgent) IsPreview() bool                        { return false }
 func (m *mockLifecycleAgent) DetectPresence() (bool, error)          { return false, nil }
-func (m *mockLifecycleAgent) GetHookConfigPath() string              { return "" }
-func (m *mockLifecycleAgent) SupportsHooks() bool                    { return true }
 func (m *mockLifecycleAgent) ProtectedDirs() []string                { return nil }
-func (m *mockLifecycleAgent) HookNames() []string                    { return nil }
 func (m *mockLifecycleAgent) GetSessionID(_ *agent.HookInput) string { return "" }
-
-//nolint:nilnil // Mock implementation
-func (m *mockLifecycleAgent) ParseHookInput(_ agent.HookType, _ io.Reader) (*agent.HookInput, error) {
-	return nil, nil
-}
-
-//nolint:nilnil // Mock implementation
-func (m *mockLifecycleAgent) ParseHookEvent(_ string, _ io.Reader) (*agent.Event, error) {
-	return nil, nil
-}
 
 func (m *mockLifecycleAgent) ReadTranscript(_ string) ([]byte, error) {
 	if m.transcriptErr != nil {
@@ -237,7 +224,7 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
 		t.Fatalf("Failed to create HEAD: %v", err)
 	}
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create a transcript file
 	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
@@ -277,7 +264,7 @@ func TestHandleLifecycleCompaction_ResetsTranscriptOffset(t *testing.T) {
 
 	// Initialize git repo with a commit (not empty)
 	setupGitRepoWithCommit(t, tmpDir)
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create .entire directory structure
 	if err := os.MkdirAll(paths.EntireDir, 0o755); err != nil {

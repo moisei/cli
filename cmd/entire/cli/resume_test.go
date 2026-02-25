@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -163,6 +164,35 @@ func TestCheckoutBranch(t *testing.T) {
 			t.Error("CheckoutBranch() expected error for nonexistent branch, got nil")
 		}
 	})
+
+	t.Run("rejects ref starting with dash to prevent argument injection", func(t *testing.T) {
+		// "git checkout -b evil" would create a new branch named "evil" instead
+		// of failing, because git interprets "-b" as a flag.
+		err := CheckoutBranch("-b evil")
+		if err == nil {
+			t.Fatal("CheckoutBranch() should reject refs starting with '-', got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid ref") {
+			t.Errorf("CheckoutBranch() error = %q, want error containing 'invalid ref'", err.Error())
+		}
+	})
+}
+
+func TestPerformGitResetHard_RejectsArgumentInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	setupResumeTestRepo(t, tmpDir, false)
+
+	// "git reset --hard -q" would silently reset to HEAD in quiet mode instead
+	// of failing, because git interprets "-q" as the --quiet flag.
+	err := performGitResetHard("-q")
+	if err == nil {
+		t.Fatal("performGitResetHard() should reject hashes starting with '-', got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid commit hash") {
+		t.Errorf("performGitResetHard() error = %q, want error containing 'invalid commit hash'", err.Error())
+	}
 }
 
 func TestResumeFromCurrentBranch_NoCheckpoint(t *testing.T) {

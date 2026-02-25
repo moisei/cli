@@ -49,21 +49,34 @@ func List() []AgentName {
 	return names
 }
 
-// Detect attempts to auto-detect which agent is being used.
-// Checks each registered agent's DetectPresence method.
-//
+// DetectAll returns all agents whose DetectPresence reports true.
+// Agents are checked in sorted name order (via List()) for deterministic results.
+// Returns an empty slice when no agent is detected.
+func DetectAll() []Agent {
+	names := List() // sorted, lock-safe
 
-func Detect() (Agent, error) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-
-	for _, factory := range registry {
-		ag := factory()
+	var detected []Agent
+	for _, name := range names {
+		ag, err := Get(name)
+		if err != nil {
+			continue
+		}
 		if present, err := ag.DetectPresence(); err == nil && present {
-			return ag, nil
+			detected = append(detected, ag)
 		}
 	}
-	return nil, fmt.Errorf("no agent detected (available: %v)", List())
+	return detected
+}
+
+// Detect attempts to auto-detect which agent is being used.
+// Iterates registered agents in sorted name order for deterministic results.
+// Returns the first agent whose DetectPresence reports true.
+func Detect() (Agent, error) {
+	detected := DetectAll()
+	if len(detected) == 0 {
+		return nil, fmt.Errorf("no agent detected (available: %v)", List())
+	}
+	return detected[0], nil
 }
 
 // AgentName is the registry key type for agents (e.g., "claude-code", "gemini").
@@ -80,12 +93,14 @@ type AgentType string
 const (
 	AgentNameClaudeCode AgentName = "claude-code"
 	AgentNameGemini     AgentName = "gemini"
+	AgentNameOpenCode   AgentName = "opencode"
 )
 
 // Agent type constants (type identifiers stored in metadata/trailers)
 const (
 	AgentTypeClaudeCode AgentType = "Claude Code"
 	AgentTypeGemini     AgentType = "Gemini CLI"
+	AgentTypeOpenCode   AgentType = "OpenCode"
 	AgentTypeUnknown    AgentType = "Agent" // Fallback for backwards compatibility
 )
 

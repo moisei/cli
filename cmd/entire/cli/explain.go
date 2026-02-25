@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -533,8 +534,21 @@ func getAssociatedCommits(repo *git.Repository, checkpointID id.CheckpointID, se
 // For Claude Code (JSONL), the offset is a line number and we slice by line.
 // For Gemini (single JSON blob), the offset is a message index and we slice by message.
 func scopeTranscriptForCheckpoint(fullTranscript []byte, startOffset int, agentType agent.AgentType) []byte {
-	if agentType == agent.AgentTypeGemini {
-		return geminicli.SliceFromMessage(fullTranscript, startOffset)
+	switch agentType {
+	case agent.AgentTypeGemini:
+		scoped, err := geminicli.SliceFromMessage(fullTranscript, startOffset)
+		if err != nil {
+			return nil
+		}
+		return scoped
+	case agent.AgentTypeOpenCode:
+		scoped, err := opencode.SliceFromMessage(fullTranscript, startOffset)
+		if err != nil {
+			return nil
+		}
+		return scoped
+	case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
+		return transcript.SliceFromLine(fullTranscript, startOffset)
 	}
 	return transcript.SliceFromLine(fullTranscript, startOffset)
 }
@@ -781,7 +795,7 @@ var errStopIteration = errors.New("stop iteration")
 // getCurrentWorktreeHash returns the hashed worktree ID for the current working directory.
 // This is used to filter shadow branches to only those belonging to this worktree.
 func getCurrentWorktreeHash() string {
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		return ""
 	}
@@ -1526,12 +1540,15 @@ func countLines(content []byte) int {
 // transcriptOffset returns the appropriate offset for scoping a transcript.
 // For Claude Code (JSONL), this is the line count. For Gemini (JSON), this is the message count.
 func transcriptOffset(transcriptBytes []byte, agentType agent.AgentType) int {
-	if agentType == agent.AgentTypeGemini {
+	switch agentType {
+	case agent.AgentTypeGemini:
 		t, err := geminicli.ParseTranscript(transcriptBytes)
 		if err != nil {
 			return 0
 		}
 		return len(t.Messages)
+	case agent.AgentTypeClaudeCode, agent.AgentTypeOpenCode, agent.AgentTypeUnknown:
+		return countLines(transcriptBytes)
 	}
 	return countLines(transcriptBytes)
 }

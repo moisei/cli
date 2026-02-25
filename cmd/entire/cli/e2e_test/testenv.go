@@ -77,6 +77,32 @@ func NewFeatureBranchEnv(t *testing.T, strategyName string) *TestEnv {
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/e2e-test")
 
+	// OpenCode's `run` (non-interactive) mode defaults external_directory permission
+	// to "ask", which auto-rejects since there's no user to prompt — even when the
+	// path is the project directory itself. Override to "allow" for the test repo.
+	// Note: specific path patterns don't work here because OpenCode evaluates the
+	// catch-all "ask" rule before specific "allow" rules (known issue).
+	// Include $schema to prevent OpenCode from modifying the file when it runs.
+	if defaultAgent == AgentNameOpenCode {
+		opencodeConfig := `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "external_directory": "allow"
+  }`
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			opencodeConfig += `,
+  "provider": {
+    "anthropic": {
+      "options": {
+        "apiKey": "` + os.Getenv("ANTHROPIC_API_KEY") + `"
+      }
+    }
+  }`
+		}
+		opencodeConfig += "\n}\n"
+		env.WriteFile("opencode.json", opencodeConfig)
+	}
+
 	// Use `entire enable` to set up everything (hooks, settings, etc.)
 	// This sets up .entire/settings.json and .claude/settings.json with hooks
 	env.RunEntireEnable(strategyName)
@@ -222,7 +248,6 @@ func (env *TestEnv) GitAdd(paths ...string) {
 func (env *TestEnv) GitAddAll() {
 	env.T.Helper()
 
-	//nolint:gosec // test code, "." is safe
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = env.RepoDir
 	if output, err := cmd.CombinedOutput(); err != nil {

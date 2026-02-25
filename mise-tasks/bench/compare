@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+#MISE description="Compare benchmarks between current branch and base ref (requires benchstat: go install golang.org/x/perf/cmd/benchstat@latest)"
+set -euo pipefail
+
+BENCH_PATTERN="${BENCH_PATTERN:-.}"
+BENCH_PKG="${BENCH_PKG:-./...}"
+BENCH_COUNT="${BENCH_COUNT:-6}"
+BENCH_TIMEOUT="${BENCH_TIMEOUT:-10m}"
+BENCH_TAGS="${BENCH_TAGS:-}"
+BASE_REF="${BASE_REF:-main}"
+
+if ! command -v benchstat &>/dev/null; then
+  echo "benchstat not found. Install with: go install golang.org/x/perf/cmd/benchstat@latest"
+  exit 1
+fi
+
+current_branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$current_branch" = "$BASE_REF" ]; then
+  echo "Already on $BASE_REF — nothing to compare. Run from a feature branch."
+  exit 1
+fi
+
+tmpdir=$(mktemp -d)
+on_base_ref=false
+has_changes=false
+
+cleanup() {
+  if [ "$on_base_ref" = true ]; then
+    git checkout "$current_branch" --quiet 2>/dev/null || true
+  fi
+  if [ "$has_changes" = true ]; then
+    git stash pop --quiet 2>/dev/null || true
+  fi
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+# Filter go test output to only valid benchmark lines (excludes stderr noise like "✓ Created orphan branch")
+run_bench() {
+  local label="$1" out="$2"
+  echo "=== Benchmarking: $label ==="
+  go test ${BENCH_TAGS:+-tags="$BENCH_TAGS"} -bench="$BENCH_PATTERN" -benchmem -run='^$' -count="$BENCH_COUNT" -timeout="$BENCH_TIMEOUT" "$BENCH_PKG" 2>/dev/null \
+    | grep -E '^(Benchmark.*[[:space:]]+[0-9]|goos:|goarch:|pkg:|cpu:)' > "$out"
+  local n
+  n=$(grep -c '^Benchmark' "$out" || true)
+  if [ "$n" -eq 0 ]; then
+    echo "  ERROR: no benchmark results captured."
+    return 1
+  fi
+  echo "  captured $n result lines"
+}
+
+# Use branch names as filenames so benchstat shows them as column headers
+new_out="$tmpdir/$current_branch"
+if ! run_bench "$current_branch" "$new_out"; then
+  exit 1
+fi
+
+# Stash, switch to base, run, switch back
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  has_changes=true
+  git stash push -q -m "bench:compare auto-stash"
+fi
+
+old_out="$tmpdir/$BASE_REF"
+echo ""
+git checkout "$BASE_REF" --quiet 2>/dev/null
+on_base_ref=true
+
+if ! run_bench "$BASE_REF" "$old_out"; then
+  echo ""
+  echo "Benchmark does not exist on $BASE_REF. Showing current branch only:"
+  git checkout "$current_branch" --quiet 2>/dev/null
+  on_base_ref=false
+  [ "$has_changes" = true ] && git stash pop --quiet && has_changes=false
+  echo ""
+  (cd "$tmpdir" && benchstat "$(basename "$new_out")")
+  exit 0
+fi
+
+git checkout "$current_branch" --quiet 2>/dev/null
+on_base_ref=false
+[ "$has_changes" = true ] && git stash pop --quiet && has_changes=false
+
+echo ""
+(cd "$tmpdir" && benchstat "$(basename "$old_out")" "$(basename "$new_out")")

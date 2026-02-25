@@ -45,19 +45,20 @@ func CheckpointPath(checkpointID id.CheckpointID) string {
 	return checkpointID.Path()
 }
 
-// repoRootCache caches the repository root to avoid repeated git commands.
+// worktreeRootCache caches the worktree root to avoid repeated git commands.
 // The cache is keyed by the current working directory to handle directory changes.
 var (
-	repoRootMu       sync.RWMutex
-	repoRootCache    string
-	repoRootCacheDir string
+	worktreeRootMu       sync.RWMutex
+	worktreeRootCache    string
+	worktreeRootCacheDir string
 )
 
-// RepoRoot returns the git repository root directory.
-// Uses 'git rev-parse --show-toplevel' which works from any subdirectory.
+// WorktreeRoot returns the git worktree root directory.
+// Uses 'git rev-parse --show-toplevel' which returns the working tree toplevel.
+// In a worktree this is the worktree root, not the main repository root.
 // The result is cached per working directory.
 // Returns an error if not inside a git repository.
-func RepoRoot() (string, error) {
+func WorktreeRoot() (string, error) {
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
 	if err != nil {
@@ -65,60 +66,50 @@ func RepoRoot() (string, error) {
 	}
 
 	// Check cache with read lock first
-	repoRootMu.RLock()
-	if repoRootCache != "" && repoRootCacheDir == cwd {
-		cached := repoRootCache
-		repoRootMu.RUnlock()
+	worktreeRootMu.RLock()
+	if worktreeRootCache != "" && worktreeRootCacheDir == cwd {
+		cached := worktreeRootCache
+		worktreeRootMu.RUnlock()
 		return cached, nil
 	}
-	repoRootMu.RUnlock()
+	worktreeRootMu.RUnlock()
 
-	// Cache miss - get repo root and update cache with write lock
+	// Cache miss - get worktree root and update cache with write lock
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to get git repository root: %w", err)
+		return "", fmt.Errorf("failed to get git worktree root: %w", err)
 	}
 
 	root := strings.TrimSpace(string(output))
 
-	repoRootMu.Lock()
-	repoRootCache = root
-	repoRootCacheDir = cwd
-	repoRootMu.Unlock()
+	worktreeRootMu.Lock()
+	worktreeRootCache = root
+	worktreeRootCacheDir = cwd
+	worktreeRootMu.Unlock()
 
 	return root, nil
 }
 
-// ClearRepoRootCache clears the cached repository root.
+// ClearWorktreeRootCache clears the cached worktree root.
 // This is primarily useful for testing when changing directories.
-func ClearRepoRootCache() {
-	repoRootMu.Lock()
-	repoRootCache = ""
-	repoRootCacheDir = ""
-	repoRootMu.Unlock()
-}
-
-// RepoRootOr returns the git repository root directory, or the current directory
-// if not inside a git repository. This is useful for functions that need a fallback.
-func RepoRootOr(fallback string) string {
-	root, err := RepoRoot()
-	if err != nil {
-		return fallback
-	}
-	return root
+func ClearWorktreeRootCache() {
+	worktreeRootMu.Lock()
+	worktreeRootCache = ""
+	worktreeRootCacheDir = ""
+	worktreeRootMu.Unlock()
 }
 
 // AbsPath returns the absolute path for a relative path within the repository.
 // If the path is already absolute, it is returned as-is.
-// Uses RepoRoot() to resolve paths relative to the repository root.
+// Uses WorktreeRoot() to resolve paths relative to the worktree root.
 func AbsPath(relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return relPath, nil
 	}
 
-	root, err := RepoRoot()
+	root, err := WorktreeRoot()
 	if err != nil {
 		return "", err
 	}

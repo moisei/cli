@@ -63,8 +63,6 @@ const DefaultStrategyName = StrategyNameManualCommit
 
 // Default returns the default strategy.
 // Falls back to returning nil if no strategies are registered.
-//
-
 func Default() Strategy {
 	s, err := Get(DefaultStrategyName)
 	if err != nil {

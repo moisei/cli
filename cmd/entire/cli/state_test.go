@@ -48,7 +48,7 @@ func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
 		t.Fatalf("Failed to create HEAD: %v", err)
 	}
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
 		t.Fatalf("Failed to create tmp dir: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestFindActivePreTaskFile(t *testing.T) {
 	}
 
 	// Clear the repo root cache to pick up the new repo
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create .entire/tmp directory
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {
@@ -306,7 +306,7 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 	}
 
 	// Clear the repo root cache to pick up the new repo
-	paths.ClearRepoRootCache()
+	paths.ClearWorktreeRootCache()
 
 	// Create .entire/tmp directory
 	if err := os.MkdirAll(paths.EntireTmpDir, 0o755); err != nil {

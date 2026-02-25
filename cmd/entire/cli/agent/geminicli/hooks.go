@@ -11,11 +11,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Ensure GeminiCLIAgent implements HookSupport and HookHandler
-var (
-	_ agent.HookSupport = (*GeminiCLIAgent)(nil)
-	_ agent.HookHandler = (*GeminiCLIAgent)(nil)
-)
+// Ensure GeminiCLIAgent implements HookSupport
+var _ agent.HookSupport = (*GeminiCLIAgent)(nil)
 
 // Gemini CLI hook names - these become subcommands under `entire hooks gemini`
 const (
@@ -41,34 +38,16 @@ var entireHookPrefixes = []string{
 	"go run ${GEMINI_PROJECT_DIR}/cmd/entire/main.go ",
 }
 
-// GetHookNames returns the hook verbs Gemini CLI supports.
-// These become subcommands: entire hooks gemini <verb>
-func (g *GeminiCLIAgent) GetHookNames() []string {
-	return []string{
-		HookNameSessionStart,
-		HookNameSessionEnd,
-		HookNameBeforeAgent,
-		HookNameAfterAgent,
-		HookNameBeforeModel,
-		HookNameAfterModel,
-		HookNameBeforeToolSelection,
-		HookNameBeforeTool,
-		HookNameAfterTool,
-		HookNamePreCompress,
-		HookNameNotification,
-	}
-}
-
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(localDev bool, force bool) (int, error) {
 	// Use repo root instead of CWD to find .gemini directory
 	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when RepoRoot() fails (tests run outside git repos)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get current directory: %w", err)
 		}
@@ -267,7 +246,7 @@ func marshalGeminiHookType(rawHooks map[string]json.RawMessage, hookType string,
 // UninstallHooks removes Entire hooks from Gemini CLI settings.
 func (g *GeminiCLIAgent) UninstallHooks() error {
 	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
@@ -361,7 +340,7 @@ func (g *GeminiCLIAgent) UninstallHooks() error {
 // AreHooksInstalled checks if Entire hooks are installed.
 func (g *GeminiCLIAgent) AreHooksInstalled() bool {
 	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
 	}
@@ -388,18 +367,6 @@ func (g *GeminiCLIAgent) AreHooksInstalled() bool {
 		hasEntireHook(settings.Hooks.AfterTool) ||
 		hasEntireHook(settings.Hooks.PreCompress) ||
 		hasEntireHook(settings.Hooks.Notification)
-}
-
-// GetSupportedHooks returns the hook types Gemini CLI supports.
-func (g *GeminiCLIAgent) GetSupportedHooks() []agent.HookType {
-	return []agent.HookType{
-		agent.HookSessionStart,
-		agent.HookSessionEnd,       // Maps to Gemini's SessionEnd (explicit exit/logout)
-		agent.HookStop,             // Maps to Gemini's AfterAgent (end of response)
-		agent.HookUserPromptSubmit, // Maps to Gemini's BeforeAgent (user prompt)
-		agent.HookPreToolUse,       // Maps to Gemini's BeforeTool
-		agent.HookPostToolUse,      // Maps to Gemini's AfterTool
-	}
 }
 
 // Helper functions for hook management

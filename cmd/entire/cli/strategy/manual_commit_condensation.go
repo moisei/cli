@@ -12,12 +12,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -126,7 +128,7 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		// potentially stale shadow branch copy (SaveStep may have been skipped if the
 		// last turn had no code changes).
 		// Pass CheckpointTranscriptStart for accurate token calculation (line offset for Claude, message index for Gemini).
-		sessionData, err = s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart)
+		sessionData, err = s.extractSessionData(repo, ref.Hash(), state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -135,6 +137,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		// Extract data directly from live transcript.
 		if state.TranscriptPath == "" {
 			return nil, errors.New("shadow branch not found and no live transcript available")
+		}
+		// Ensure transcript file exists (OpenCode creates it lazily via `opencode export`).
+		// Only wait for flush when the session is active — for idle/ended sessions the
+		// transcript is already fully flushed (the Stop hook completed the flush).
+		if state.Phase.IsActive() {
+			prepareTranscriptIfNeeded(state.AgentType, state.TranscriptPath)
 		}
 		sessionData, err = s.extractSessionDataFromLiveTranscript(state)
 		if err != nil {
@@ -146,7 +154,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 	// committed in this specific commit. This ensures each checkpoint represents
 	// exactly the files in that commit, not all files mentioned in the transcript.
 	if len(committedFiles) > 0 {
-		if len(sessionData.FilesTouched) > 0 {
+		// Track if we had files before filtering to distinguish between:
+		// - Session had files but none were committed (don't fallback)
+		// - Session had no files to begin with (mid-session commit, fallback OK)
+		hadFilesBeforeFiltering := len(sessionData.FilesTouched) > 0
+
+		if hadFilesBeforeFiltering {
 			// Filter to intersection of transcript-extracted files and committed files
 			filtered := make([]string, 0, len(sessionData.FilesTouched))
 			for _, f := range sessionData.FilesTouched {
@@ -157,10 +170,12 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 			sessionData.FilesTouched = filtered
 		}
 
-		// If extraction failed or returned empty, use committedFiles as fallback.
-		// This handles mid-session commits where transcript parsing may not find files
-		// but we know what was committed.
-		if len(sessionData.FilesTouched) == 0 {
+		// Only use committedFiles as fallback for genuine mid-session commits where
+		// no files were tracked yet (extraction returned empty). Do NOT fallback when
+		// the session had files that simply didn't overlap with the commit - that
+		// indicates an unrelated session that shouldn't have its files_touched
+		// overwritten with unrelated committed files.
+		if len(sessionData.FilesTouched) == 0 && !hadFilesBeforeFiltering {
 			sessionData.FilesTouched = make([]string, 0, len(committedFiles))
 			for f := range committedFiles {
 				sessionData.FilesTouched = append(sessionData.FilesTouched, f)
@@ -191,11 +206,26 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 
 		// Scope transcript to this checkpoint's portion.
 		// For Claude Code (JSONL), CheckpointTranscriptStart is a line offset.
-		// For Gemini (JSON), CheckpointTranscriptStart is a message index.
+		// For Gemini/OpenCode (JSON), CheckpointTranscriptStart is a message index.
 		var scopedTranscript []byte
-		if state.AgentType == agent.AgentTypeGemini {
-			scopedTranscript = geminicli.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
-		} else {
+		switch state.AgentType {
+		case agent.AgentTypeGemini:
+			scoped, sliceErr := geminicli.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
+			if sliceErr != nil {
+				logging.Warn(summarizeCtx, "failed to scope Gemini transcript for summary",
+					slog.String("session_id", state.SessionID),
+					slog.String("error", sliceErr.Error()))
+			}
+			scopedTranscript = scoped
+		case agent.AgentTypeOpenCode:
+			scoped, sliceErr := opencode.SliceFromMessage(sessionData.Transcript, state.CheckpointTranscriptStart)
+			if sliceErr != nil {
+				logging.Warn(summarizeCtx, "failed to scope OpenCode transcript for summary",
+					slog.String("session_id", state.SessionID),
+					slog.String("error", sliceErr.Error()))
+			}
+			scopedTranscript = scoped
+		case agent.AgentTypeClaudeCode, agent.AgentTypeUnknown:
 			scopedTranscript = transcript.SliceFromLine(sessionData.Transcript, state.CheckpointTranscriptStart)
 		}
 		if len(scopedTranscript) > 0 {
@@ -234,7 +264,6 @@ func (s *ManualCommitStrategy) CondenseSession(repo *git.Repository, checkpointI
 		TokenUsage:                  sessionData.TokenUsage,
 		InitialAttribution:          attribution,
 		Summary:                     summary,
-		SessionTranscriptPath:       homeRelativePath(state.TranscriptPath),
 	}); err != nil {
 		return nil, fmt.Errorf("failed to write checkpoint metadata: %w", err)
 	}
@@ -367,7 +396,7 @@ func calculateSessionAttributions(repo *git.Repository, shadowRef *plumbing.Refe
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int) (*ExtractedSessionData, error) {
+func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType agent.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit object: %w", err)
@@ -387,6 +416,12 @@ func (s *ManualCommitStrategy) extractSessionData(repo *git.Repository, shadowRe
 	// (SaveStep is only called when there are file modifications).
 	var fullTranscript string
 	if liveTranscriptPath != "" {
+		// Ensure transcript file exists (OpenCode creates it lazily via `opencode export`).
+		// Only wait for flush when the session is active — for idle/ended sessions the
+		// transcript is already fully flushed (the Stop hook completed the flush).
+		if isActive {
+			prepareTranscriptIfNeeded(agentType, liveTranscriptPath)
+		}
 		if liveData, readErr := os.ReadFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 { //nolint:gosec // path from session state
 			fullTranscript = string(liveData)
 		}
@@ -467,10 +502,19 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(state *Sessi
 
 // countTranscriptItems counts lines (JSONL) or messages (JSON) in a transcript.
 // For Claude Code and JSONL-based agents, this counts lines.
-// For Gemini CLI and JSON-based agents, this counts messages.
+// For Gemini CLI, OpenCode, and JSON-based agents, this counts messages.
 // Returns 0 if the content is empty or malformed.
 func countTranscriptItems(agentType agent.AgentType, content string) int {
 	if content == "" {
+		return 0
+	}
+
+	// OpenCode uses export JSON format with {"info": {...}, "messages": [...]}
+	if agentType == agent.AgentTypeOpenCode {
+		session, err := opencode.ParseExportSession([]byte(content))
+		if err == nil && session != nil {
+			return len(session.Messages)
+		}
 		return 0
 	}
 
@@ -500,6 +544,21 @@ func countTranscriptItems(agentType agent.AgentType, content string) int {
 // Returns prompts with IDE context tags stripped (e.g., <ide_opened_file>).
 func extractUserPrompts(agentType agent.AgentType, content string) []string {
 	if content == "" {
+		return nil
+	}
+
+	// OpenCode uses JSONL with a different per-line schema than Claude Code
+	if agentType == agent.AgentTypeOpenCode {
+		prompts, err := opencode.ExtractAllUserPrompts([]byte(content))
+		if err == nil && len(prompts) > 0 {
+			cleaned := make([]string, 0, len(prompts))
+			for _, prompt := range prompts {
+				if stripped := textutil.StripIDEContextTags(prompt); stripped != "" {
+					cleaned = append(cleaned, stripped)
+				}
+			}
+			return cleaned
+		}
 		return nil
 	}
 
@@ -534,6 +593,11 @@ func extractUserPrompts(agentType agent.AgentType, content string) []string {
 func calculateTokenUsage(agentType agent.AgentType, data []byte, startOffset int) *agent.TokenUsage {
 	if len(data) == 0 {
 		return &agent.TokenUsage{}
+	}
+
+	// OpenCode uses JSONL with token info on assistant messages (different schema from Claude Code)
+	if agentType == agent.AgentTypeOpenCode {
+		return opencode.CalculateTokenUsageFromBytes(data, startOffset)
 	}
 
 	// Try Gemini format first if agentType is Gemini, or as fallback if Unknown
@@ -632,11 +696,9 @@ func generateContextFromPrompts(prompts []string) []byte {
 	buf.WriteString("## User Prompts\n\n")
 
 	for i, prompt := range prompts {
-		// Truncate very long prompts for readability
-		displayPrompt := prompt
-		if len(displayPrompt) > 500 {
-			displayPrompt = displayPrompt[:500] + "..."
-		}
+		// Truncate very long prompts for readability.
+		// Use rune-based truncation to avoid splitting multi-byte UTF-8 characters (e.g. CJK).
+		displayPrompt := stringutil.TruncateRunes(prompt, 500, "...")
 		buf.WriteString(fmt.Sprintf("### Prompt %d\n\n", i+1))
 		buf.WriteString(displayPrompt)
 		buf.WriteString("\n\n")

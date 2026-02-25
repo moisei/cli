@@ -322,62 +322,40 @@ func (s *ManualCommitStrategy) Rewind(point RewindPoint) error {
 	})
 
 	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		repoRoot = "." // Fallback to current directory
 	}
 
-	// Find and delete untracked files that aren't in the checkpoint
-	// These are likely files created by the agent in later checkpoints
-	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil //nolint:nilerr // Skip filesystem errors during walk
-		}
-
-		// Get path relative to repo root
-		relPath, relErr := filepath.Rel(repoRoot, path)
-		if relErr != nil {
-			return nil //nolint:nilerr // Skip paths we can't make relative
-		}
-
-		// Skip directories and protected paths
-		if info.IsDir() {
-			if isProtectedPath(relPath) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Skip files in protected directories
-		if isProtectedPath(relPath) {
-			return nil
-		}
-
+	// Find and delete untracked files that aren't in the checkpoint.
+	// Uses git ls-files to only consider non-ignored files, avoiding walks through
+	// large ignored directories like node_modules/.
+	untrackedNow, err := collectUntrackedFiles()
+	if err != nil {
+		// Non-fatal - continue with restoration
+		fmt.Fprintf(os.Stderr, "Warning: error listing untracked files: %v\n", err)
+	}
+	for _, relPath := range untrackedNow {
 		// If file is in checkpoint, it will be restored
 		if checkpointFiles[relPath] {
-			return nil
+			continue
 		}
 
 		// If file is tracked in HEAD, don't delete (user's committed work)
 		if trackedFiles[relPath] {
-			return nil
+			continue
 		}
 
 		// If file existed at session start, preserve it (untracked user files)
 		if preservedUntrackedFiles[relPath] {
-			return nil
+			continue
 		}
 
-		// File is untracked and not in checkpoint - delete it (use absolute path)
-		if removeErr := os.Remove(path); removeErr == nil {
+		// File is untracked and not in checkpoint - delete it
+		absPath := filepath.Join(repoRoot, relPath)
+		if removeErr := os.Remove(absPath); removeErr == nil {
 			fmt.Fprintf(os.Stderr, "  Deleted: %s\n", relPath)
 		}
-
-		return nil
-	})
-	if err != nil {
-		// Non-fatal - continue with restoration
-		fmt.Fprintf(os.Stderr, "Warning: error walking directory: %v\n", err)
 	}
 
 	// Restore files from checkpoint
@@ -543,62 +521,28 @@ func (s *ManualCommitStrategy) PreviewRewind(point RewindPoint) (*RewindPreview,
 		return nil
 	})
 
-	// Get repository root to walk from there
-	repoRoot, err := GetWorktreePath()
-	if err != nil {
-		repoRoot = "."
-	}
-
-	// Find untracked files that would be deleted
+	// Find untracked files that would be deleted.
+	// Uses git ls-files to only consider non-ignored files.
 	var filesToDelete []string
-	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil //nolint:nilerr // Skip filesystem errors during walk
-		}
-
-		relPath, relErr := filepath.Rel(repoRoot, path)
-		if relErr != nil {
-			return nil //nolint:nilerr // Skip paths we can't make relative
-		}
-
-		// Skip directories and protected paths
-		if info.IsDir() {
-			if isProtectedPath(relPath) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Skip files in protected directories
-		if isProtectedPath(relPath) {
-			return nil
-		}
-
-		// If file is in checkpoint, it will be restored (not deleted)
-		if checkpointFiles[relPath] {
-			return nil
-		}
-
-		// If file is tracked in HEAD, don't delete (user's committed work)
-		if trackedFiles[relPath] {
-			return nil
-		}
-
-		// If file existed at session start, preserve it (untracked user files)
-		if preservedUntrackedFiles[relPath] {
-			return nil
-		}
-
-		// File is untracked and not in checkpoint - will be deleted
-		filesToDelete = append(filesToDelete, relPath)
-		return nil
-	})
-	if err != nil {
-		// Non-fatal, return what we have
-		return &RewindPreview{ //nolint:nilerr // Partial result is still useful
+	untrackedNow, untrackedErr := collectUntrackedFiles()
+	if untrackedErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not list untracked files for preview: %v\n", untrackedErr)
+		return &RewindPreview{
 			FilesToRestore: filesToRestore,
 			FilesToDelete:  filesToDelete,
 		}, nil
+	}
+	for _, relPath := range untrackedNow {
+		if checkpointFiles[relPath] {
+			continue
+		}
+		if trackedFiles[relPath] {
+			continue
+		}
+		if preservedUntrackedFiles[relPath] {
+			continue
+		}
+		filesToDelete = append(filesToDelete, relPath)
 	}
 
 	// Sort for consistent output
@@ -641,10 +585,10 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([
 		return nil, fmt.Errorf("checkpoint not found: %s", point.CheckpointID)
 	}
 
-	// Get repo root for agent session directory lookup
-	repoRoot, err := paths.RepoRoot()
+	// Get worktree root for agent session directory lookup
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get repository root: %w", err)
+		return nil, fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
 	// Check for newer local logs if not forcing
@@ -704,19 +648,13 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([
 			continue
 		}
 
-		// Prefer transcript path from checkpoint metadata (works for all agents).
-		// Fall back to agent-based resolution for old checkpoints without this field.
-		var sessionFile string
-		if resolved := resolveTranscriptPathFromMetadata(content.Metadata.TranscriptPath); resolved != "" {
-			sessionFile = resolved
-		} else {
-			sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
-			if dirErr != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
-				continue
-			}
-			sessionFile = ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+		// Compute transcript path from current repo location for cross-machine portability.
+		sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
+		if dirErr != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
+			continue
 		}
+		sessionFile := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
 
 		// Get first prompt for display
 		promptPreview := ExtractFirstPrompt(content.Prompts)
@@ -741,35 +679,30 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(point RewindPoint, force bool) ([
 			continue
 		}
 
-		if writeErr := os.WriteFile(sessionFile, content.Transcript, 0o600); writeErr != nil {
+		agentSession := &agent.AgentSession{
+			SessionID:  sessionID,
+			AgentName:  sessionAgent.Name(),
+			RepoPath:   repoRoot,
+			SessionRef: sessionFile,
+			NativeData: content.Transcript,
+		}
+		if writeErr := sessionAgent.WriteSession(agentSession); writeErr != nil {
 			if totalSessions > 1 {
-				fmt.Fprintf(os.Stderr, "    Warning: failed to write transcript: %v\n", writeErr)
+				fmt.Fprintf(os.Stderr, "    Warning: failed to write session: %v\n", writeErr)
 				continue
 			}
-			return nil, fmt.Errorf("failed to write transcript: %w", writeErr)
+			return nil, fmt.Errorf("failed to write session: %w", writeErr)
 		}
 
 		restored = append(restored, RestoredSession{
 			SessionID: sessionID,
 			Agent:     sessionAgent.Type(),
 			Prompt:    promptPreview,
+			CreatedAt: content.Metadata.CreatedAt,
 		})
 	}
 
 	return restored, nil
-}
-
-// resolveTranscriptPathFromMetadata expands a home-relative transcript path
-// from checkpoint metadata to an absolute path. Returns "" if the path is empty.
-func resolveTranscriptPathFromMetadata(homeRelPath string) string {
-	if homeRelPath == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	return filepath.Join(home, homeRelPath)
 }
 
 // ResolveAgentForRewind resolves the agent from checkpoint metadata.
@@ -787,19 +720,6 @@ func ResolveAgentForRewind(agentType agent.AgentType) (agent.Agent, error) {
 		return nil, fmt.Errorf("resolving agent %q: %w", agentType, err)
 	}
 	return ag, nil
-}
-
-// ResolveSessionFilePath determines the correct file path for an agent's session transcript.
-// Checks session state for transcript_path first (needed for agents like Gemini that store
-// transcripts at paths that GetSessionDir can't reconstruct, e.g. SHA-256 hashed directories).
-// Falls back to the agent's ExtractAgentSessionID + ResolveSessionFile with fallbackSessionDir.
-func ResolveSessionFilePath(sessionID string, ag agent.Agent, fallbackSessionDir string) string {
-	state, err := LoadSessionState(sessionID)
-	if err == nil && state != nil && state.TranscriptPath != "" {
-		return state.TranscriptPath
-	}
-
-	return ag.ResolveSessionFile(fallbackSessionDir, sessionID)
 }
 
 // readSessionPrompt reads the first prompt from the session's prompt.txt file stored in git.
@@ -875,17 +795,12 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 			continue
 		}
 
-		// Prefer transcript path from checkpoint metadata, fall back to agent-based resolution.
-		var localPath string
-		if resolved := resolveTranscriptPathFromMetadata(content.Metadata.TranscriptPath); resolved != "" {
-			localPath = resolved
-		} else {
-			sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
-			if dirErr != nil {
-				continue
-			}
-			localPath = ResolveSessionFilePath(sessionID, sessionAgent, sessionAgentDir)
+		// Compute transcript path from current repo location for cross-machine portability.
+		sessionAgentDir, dirErr := sessionAgent.GetSessionDir(repoRoot)
+		if dirErr != nil {
+			continue
 		}
+		localPath := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)

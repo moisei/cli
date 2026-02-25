@@ -111,7 +111,7 @@ func Init(sessionID string) error {
 	}
 
 	// Determine log file path
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Fall back to current directory
 		repoRoot = "."

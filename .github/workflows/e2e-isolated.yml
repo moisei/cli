@@ -1,0 +1,59 @@
+name: E2E Isolated Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "Agent to test"
+        required: true
+        default: "gemini"
+        type: choice
+        options: [claude, opencode, gemini]
+      test:
+        description: "Test name filter (regex)"
+        required: true
+        default: "TestInteractiveMultiStep"
+
+jobs:
+  e2e-isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Build entire CLI
+        run: go build -o /usr/local/bin/entire ./cmd/entire
+
+      - name: Install agent CLI
+        run: |
+          case "${{ inputs.agent }}" in
+            claude)   curl -fsSL https://claude.ai/install.sh | bash ;;
+            opencode) curl -fsSL https://opencode.ai/install | bash ;;
+            gemini)   npm install -g @google/gemini-cli ;;
+          esac
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Run isolated test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: |
+          mkdir -p "$E2E_ARTIFACT_DIR"
+          mise run test:e2e:${{ inputs.agent }} "${{ inputs.test }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-isolated-${{ inputs.agent }}-${{ inputs.test }}
+          path: e2e-artifacts/
+          retention-days: 7

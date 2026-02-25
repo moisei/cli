@@ -56,7 +56,7 @@ Contributions and communications are expected to occur through:
 
 - [GitHub Issues](https://github.com/entireio/cli/issues) - Bug reports and feature requests
 - [GitHub Discussions](https://github.com/entireio/cli/discussions) - Questions and general conversation
-- [Discord](https://discord.gg/4WXDu2Ph) - Real-time chat and support
+- [Discord](https://discord.gg/jZJs3Tue4S) - Real-time chat and support
 
 Please represent the project and community respectfully in all public and private interactions.
 
@@ -219,7 +219,7 @@ These are markdown files that define specialized behaviors for Claude Code (e.g.
 
 ### 2. Coding Agent Integrations (Go)
 
-These are Go implementations that integrate Entire with different AI coding tools (Claude, Cursor, Aider, etc.) using the Agent abstraction layer.
+These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Gemini CLI, OpenCode, etc.) using the Agent abstraction layer.
 
 - **Location:** `cmd/entire/cli/agent/`
 - **Steps:**
@@ -329,7 +329,7 @@ Join the Entire community:
 - **Discord** - [Join our server][discord] for discussions and support
 - **GitHub Discussions** - [Join the conversation][discussions]
 
-[discord]: https://discord.gg/4WXDu2Ph
+[discord]: https://discord.gg/jZJs3Tue4S
 [discussions]: https://github.com/entireio/cli/discussions
 
 ---
@@ -337,7 +337,8 @@ Join the Entire community:
 ## Additional Resources
 
 - [README](README.md) - Setup and usage documentation
-- [CLAUDE.md](CLAUDE.md) - Architecture and development reference
+- [CLAUDE.md](CLAUDE.md) - Architecture and development reference (Claude Code)
+- [AGENTS.md](AGENTS.md) - Architecture and development reference (Gemini CLI, OpenCode)
 - [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
 - [Security Policy](SECURITY.md) - Reporting security vulnerabilities
 

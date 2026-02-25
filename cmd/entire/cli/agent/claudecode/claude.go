@@ -47,11 +47,13 @@ func (c *ClaudeCodeAgent) Description() string {
 	return "Claude Code - Anthropic's CLI coding assistant"
 }
 
+func (c *ClaudeCodeAgent) IsPreview() bool { return false }
+
 // DetectPresence checks if Claude Code is configured in the repository.
 func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
-	// Get repo root to check for .claude directory
+	// Get worktree root to check for .claude directory
 	// This is needed because the CLI may be run from a subdirectory
-	repoRoot, err := paths.RepoRoot()
+	repoRoot, err := paths.WorktreeRoot()
 	if err != nil {
 		// Not in a git repo, fall back to CWD-relative check
 		repoRoot = "."
@@ -68,80 +70,6 @@ func (c *ClaudeCodeAgent) DetectPresence() (bool, error) {
 		return true, nil
 	}
 	return false, nil
-}
-
-// GetHookConfigPath returns the path to Claude's hook config file.
-func (c *ClaudeCodeAgent) GetHookConfigPath() string {
-	return ".claude/settings.json"
-}
-
-// SupportsHooks returns true as Claude Code supports lifecycle hooks.
-func (c *ClaudeCodeAgent) SupportsHooks() bool {
-	return true
-}
-
-// ParseHookInput parses Claude Code hook input from stdin.
-func (c *ClaudeCodeAgent) ParseHookInput(hookType agent.HookType, reader io.Reader) (*agent.HookInput, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	input := &agent.HookInput{
-		HookType:  hookType,
-		Timestamp: time.Now(),
-		RawData:   make(map[string]interface{}),
-	}
-
-	// Parse based on hook type
-	switch hookType {
-	case agent.HookUserPromptSubmit:
-		var raw userPromptSubmitRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse user prompt submit: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.UserPrompt = raw.Prompt
-
-	case agent.HookSessionStart, agent.HookSessionEnd, agent.HookStop:
-		var raw sessionInfoRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse session info: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-
-	case agent.HookPreToolUse:
-		var raw taskHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse pre-tool input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.ToolUseID = raw.ToolUseID
-		input.ToolInput = raw.ToolInput
-
-	case agent.HookPostToolUse:
-		var raw postToolHookInputRaw
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("failed to parse post-tool input: %w", err)
-		}
-		input.SessionID = raw.SessionID
-		input.SessionRef = raw.TranscriptPath
-		input.ToolUseID = raw.ToolUseID
-		input.ToolInput = raw.ToolInput
-		// Store agent ID in raw data for Task tool results
-		if raw.ToolResponse.AgentID != "" {
-			input.RawData["agent_id"] = raw.ToolResponse.AgentID
-		}
-	}
-
-	return input, nil
 }
 
 // GetSessionID extracts the session ID from hook input.

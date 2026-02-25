@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Run benchmarks with memory profile (single package)"
+set -euo pipefail
+
+PKG="${BENCH_PKG:-./cmd/entire/cli/benchutil/}"
+echo "Profiling package: $PKG (override with BENCH_PKG=./path/to/pkg)"
+go test -bench=. -benchmem -run='^$' -memprofile=mem.prof -timeout=10m "$PKG"
+echo "Profile saved to mem.prof. View with: go tool pprof -http=:8080 mem.prof"

@@ -4,7 +4,7 @@ This repo contains the CLI for Entire.
 
 ## Architecture
 
-- CLI build with github.com/spf13/cobra and github.com/charmbracelet/huh 
+- CLI built with github.com/spf13/cobra and github.com/charmbracelet/huh
 
 ## Key Directories
 
@@ -12,6 +12,7 @@ This repo contains the CLI for Entire.
 - `entire/`: Main CLI entry point
 - `entire/cli`: CLI utilities and helpers
 - `entire/cli/commands`: actual command implementations
+- `entire/cli/agent`: agent implementations (Claude Code, Gemini CLI) - see [Agent Integration Checklist](docs/architecture/agent-integration-checklist.md) and [Agent Implementation Guide](docs/architecture/agent-guide.md)
 - `entire/cli/strategy`: strategy implementations - see section below
 - `entire/cli/checkpoint`: checkpoint storage abstractions (temporary and committed)
 - `entire/cli/session`: session state management
@@ -45,10 +46,10 @@ Integration tests use the `//go:build integration` build tag and are located in 
 
 ### Running E2E Tests (Only When Explicitly Requested)
 
-**IMPORTANT: Do NOT run E2E tests proactively.** E2E tests make real API calls to Claude Code, which consume tokens and cost money. Only run them when the user explicitly asks for E2E testing.
+**IMPORTANT: Do NOT run E2E tests proactively.** E2E tests make real API calls through AI agents, which consume tokens and cost money. Only run them when the user explicitly asks for E2E testing.
 
 ```bash
-# Requires Claude Code to be installed and authenticated
+# Requires the agent to be installed and authenticated
 E2E_AGENT=claude-code go test -tags=e2e ./cmd/entire/cli/e2e_test/...
 
 # Run a specific test
@@ -58,9 +59,9 @@ E2E_AGENT=claude-code go test -tags=e2e -run TestE2E_BasicWorkflow ./cmd/entire/
 E2E tests:
 - Use the `//go:build e2e` build tag
 - Located in `cmd/entire/cli/e2e_test/`
-- Test real agent interactions (Claude Code creating files, committing, etc.)
+- Test real agent interactions (Claude Code, Gemini CLI, or OpenCode creating files, committing, etc.)
 - Validate checkpoint scenarios documented in `docs/architecture/checkpoint-scenarios.md`
-- Support multiple agents via `E2E_AGENT` env var (currently `claude-code`, `gemini-cli` stub)
+- Support multiple agents via `E2E_AGENT` env var (`claude-code`, `gemini`, `opencode`)
 
 **Environment variables:**
 - `E2E_AGENT` - Agent to test with (default: `claude-code`)
@@ -148,7 +149,7 @@ Use `NewSilentError()` when you want to print a custom, user-friendly error mess
 
 ```go
 // In a command's RunE function:
-if _, err := paths.RepoRoot(); err != nil {
+if _, err := paths.WorktreeRoot(); err != nil {
     cmd.SilenceUsage = true  // Don't show usage for prerequisite errors
     fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run 'entire enable' from within a git repository.")
     return NewSilentError(errors.New("not a git repository"))
@@ -242,7 +243,7 @@ Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fix
 
 **Always use repo root (not `os.Getwd()`) when working with git-relative paths.**
 
-Git commands like `git status` and `worktree.Status()` return paths relative to the **repository root**, not the current working directory. When Claude runs from a subdirectory (e.g., `/repo/frontend`), using `os.Getwd()` to construct absolute paths will produce incorrect results for files in sibling directories.
+Git commands like `git status` and `worktree.Status()` return paths relative to the **repository root**, not the current working directory. When an agent runs from a subdirectory (e.g., `/repo/frontend`), using `os.Getwd()` to construct absolute paths will produce incorrect results for files in sibling directories.
 
 ```go
 // WRONG - breaks when running from subdirectory
@@ -250,7 +251,7 @@ cwd, _ := os.Getwd()  // e.g., /repo/frontend
 absPath := filepath.Join(cwd, file)  // file="api/src/types.ts" → /repo/frontend/api/src/types.ts (WRONG)
 
 // CORRECT - use repo root
-repoRoot, _ := paths.RepoRoot()  // or strategy.GetWorktreePath()
+repoRoot, _ := paths.WorktreeRoot()
 absPath := filepath.Join(repoRoot, file)  // → /repo/api/src/types.ts (CORRECT)
 ```
 
@@ -262,7 +263,7 @@ cwd, _ := os.Getwd()  // /repo/frontend
 relPath := paths.ToRelativePath("/repo/api/file.ts", cwd)  // returns "" (filtered out as "../api/file.ts")
 
 // CORRECT - keeps all repo files
-repoRoot, _ := paths.RepoRoot()
+repoRoot, _ := paths.WorktreeRoot()
 relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/file.ts"
 ```
 
@@ -301,6 +302,7 @@ All strategies implement:
 - Session logs are condensed to permanent `entire/checkpoints/v1` branch on user commits
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
+- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
@@ -533,7 +535,7 @@ Trailers:
 - All strategies must implement the full `Strategy` interface
 - Register new strategies in `init()` using `Register()`
 - Test with `mise run test` - strategy tests are in `*_test.go` files
-- **Update this CLAUDE.md** when adding or modifying strategies to keep documentation current
+- **Update both CLAUDE.md and AGENTS.md** when adding or modifying strategies to keep documentation current
 
 # Important Notes
 

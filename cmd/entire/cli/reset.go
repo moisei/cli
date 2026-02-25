@@ -40,7 +40,7 @@ Example: If HEAD is at commit abc1234567890, the command will:
 Without --force, prompts for confirmation before deleting.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Check if in git repository
-			if _, err := paths.RepoRoot(); err != nil {
+			if _, err := paths.WorktreeRoot(); err != nil {
 				return errors.New("not a git repository")
 			}
 

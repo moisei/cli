@@ -330,6 +330,189 @@ func TestShadow_UntrackedFilesAcrossMultipleSessions(t *testing.T) {
 	t.Log("✓ Multi-session untracked file test passed")
 }
 
+// TestShadow_GitignoredFilesExcludedFromSessionState tests that files matching
+// .gitignore patterns are NOT included in UntrackedFilesAtStart, preventing
+// bloated session state from large ignored directories like node_modules/.
+func TestShadow_GitignoredFilesExcludedFromSessionState(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+
+	// Create initial commit with a .gitignore
+	env.WriteFile(".gitignore", "node_modules/\n*.log\nbuild/\n")
+	env.WriteFile("README.md", "# Test Repository")
+	env.GitAdd(".gitignore", "README.md")
+	env.GitCommit("Initial commit with .gitignore")
+
+	env.GitCheckoutNewBranch("feature/gitignore-test")
+
+	// Create gitignored files (simulating node_modules and build artifacts)
+	env.WriteFile("node_modules/express/index.js", "module.exports = {}")
+	env.WriteFile("node_modules/express/package.json", `{"name": "express"}`)
+	env.WriteFile("node_modules/lodash/index.js", "module.exports = {}")
+	env.WriteFile("build/app.js", "compiled output")
+	env.WriteFile("debug.log", "some log output")
+
+	// Create legitimate untracked files (NOT gitignored)
+	env.WriteFile("config.local.json", `{"key": "value"}`)
+	env.WriteFile("notes.txt", "my notes")
+
+	// Initialize Entire and start session
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	// Create a checkpoint so session state is persisted
+	env.WriteFile("app.go", "package main")
+	session.CreateTranscript(
+		"Create app",
+		[]FileChange{{Path: "app.go", Content: "package main"}},
+	)
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop failed: %v", err)
+	}
+
+	// Read session state and check UntrackedFilesAtStart
+	sessionStateDir := filepath.Join(env.RepoDir, ".git", "entire-sessions")
+	stateFiles, err := os.ReadDir(sessionStateDir)
+	if err != nil {
+		t.Fatalf("Failed to read session state dir: %v", err)
+	}
+	if len(stateFiles) == 0 {
+		t.Fatal("Expected session state file")
+	}
+
+	stateFile := filepath.Join(sessionStateDir, stateFiles[0].Name())
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("Failed to read session state file: %v", err)
+	}
+	stateContent := string(stateData)
+	t.Logf("Session state:\n%s", stateContent)
+
+	// Gitignored files should NOT be in session state
+	if strings.Contains(stateContent, "node_modules") {
+		t.Error("node_modules should NOT be in UntrackedFilesAtStart (gitignored)")
+	}
+	if strings.Contains(stateContent, "build/app.js") {
+		t.Error("build/app.js should NOT be in UntrackedFilesAtStart (gitignored)")
+	}
+	if strings.Contains(stateContent, "debug.log") {
+		t.Error("debug.log should NOT be in UntrackedFilesAtStart (gitignored via *.log)")
+	}
+
+	// Legitimate untracked files SHOULD be in session state
+	if !strings.Contains(stateContent, "config.local.json") {
+		t.Error("config.local.json should be in UntrackedFilesAtStart (not gitignored)")
+	}
+	if !strings.Contains(stateContent, "notes.txt") {
+		t.Error("notes.txt should be in UntrackedFilesAtStart (not gitignored)")
+	}
+}
+
+// TestShadow_GitignoredFilesPreservedDuringRewind tests that gitignored files
+// are not accidentally deleted during rewind, even though they are not tracked
+// in UntrackedFilesAtStart (since they're excluded by .gitignore).
+func TestShadow_GitignoredFilesPreservedDuringRewind(t *testing.T) {
+	t.Parallel()
+	env := NewTestEnv(t)
+	defer env.Cleanup()
+
+	env.InitRepo()
+
+	// Create initial commit with .gitignore
+	env.WriteFile(".gitignore", "node_modules/\n*.log\n")
+	env.WriteFile("README.md", "# Test")
+	env.GitAdd(".gitignore", "README.md")
+	env.GitCommit("Initial commit")
+
+	env.GitCheckoutNewBranch("feature/rewind-gitignore")
+
+	// Create gitignored files before session
+	env.WriteFile("node_modules/pkg/index.js", "module.exports = {}")
+	env.WriteFile("server.log", "log data")
+
+	// Create untracked (not ignored) file before session
+	env.WriteFile("config.yaml", "key: value")
+
+	env.InitEntire(strategy.StrategyNameManualCommit)
+
+	initialHead := env.GetHeadHash()
+
+	session := env.NewSession()
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
+	}
+
+	// First checkpoint
+	v1 := "package main\n\nfunc main() {}\n"
+	env.WriteFile("main.go", v1)
+	session.CreateTranscript("Create main", []FileChange{{Path: "main.go", Content: v1}})
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (checkpoint 1) failed: %v", err)
+	}
+
+	// Second checkpoint with additional agent-created untracked file
+	if err := env.SimulateUserPromptSubmit(session.ID); err != nil {
+		t.Fatalf("SimulateUserPromptSubmit (2) failed: %v", err)
+	}
+	env.WriteFile("temp-agent-file.txt", "agent created this")
+	v2 := "package main\n\nfunc main() { run() }\n"
+	env.WriteFile("main.go", v2)
+	session.CreateTranscript("Update main", []FileChange{{Path: "main.go", Content: v2}})
+	if err := env.SimulateStop(session.ID, session.TranscriptPath); err != nil {
+		t.Fatalf("SimulateStop (checkpoint 2) failed: %v", err)
+	}
+
+	// Verify shadow branch exists
+	shadowBranch := env.GetShadowBranchNameForCommit(initialHead)
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("Expected shadow branch %s to exist", shadowBranch)
+	}
+
+	// Rewind to first checkpoint
+	points := env.GetRewindPoints()
+	if len(points) < 2 {
+		t.Fatalf("Expected at least 2 rewind points, got %d", len(points))
+	}
+	oldestPoint := points[len(points)-1]
+	if err := env.Rewind(oldestPoint.ID); err != nil {
+		t.Fatalf("Rewind failed: %v", err)
+	}
+
+	// Gitignored files MUST still exist (not deleted by rewind)
+	if !fileExists(filepath.Join(env.RepoDir, "node_modules/pkg/index.js")) {
+		t.Error("node_modules/pkg/index.js should be PRESERVED after rewind (gitignored)")
+	}
+	if !fileExists(filepath.Join(env.RepoDir, "server.log")) {
+		t.Error("server.log should be PRESERVED after rewind (gitignored)")
+	}
+
+	// Non-ignored untracked file that existed at session start should also be preserved
+	if !fileExists(filepath.Join(env.RepoDir, "config.yaml")) {
+		t.Error("config.yaml should be PRESERVED after rewind (existed at session start)")
+	}
+
+	// Agent-created untracked file (created after checkpoint 1) should be deleted
+	if fileExists(filepath.Join(env.RepoDir, "temp-agent-file.txt")) {
+		t.Error("temp-agent-file.txt should be DELETED after rewind (created after checkpoint 1)")
+	}
+
+	// Code should be restored to v1
+	content, err := os.ReadFile(filepath.Join(env.RepoDir, "main.go"))
+	if err != nil {
+		t.Fatalf("Failed to read main.go: %v", err)
+	}
+	if string(content) != v1 {
+		t.Errorf("main.go should be restored to v1, got: %s", string(content))
+	}
+}
+
 // Helper functions
 
 func fileExists(path string) bool {

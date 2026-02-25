@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.7] - 2026-02-24
+
+### Fixed
+
+- Commits hanging for up to 3s per session while waiting for transcript updates that were already flushed ([#482](https://github.com/entireio/cli/pull/482))
+
+### Housekeeping
+
+- Updated README to include OpenCode in the supported agent list ([#476](https://github.com/entireio/cli/pull/476))
+
+## [0.4.6] - 2026-02-24
+
+### Added
+
+- OpenCode agent support with resume, rewind, and session transcripts ([#415](https://github.com/entireio/cli/pull/415), [#428](https://github.com/entireio/cli/pull/428), [#439](https://github.com/entireio/cli/pull/439), [#445](https://github.com/entireio/cli/pull/445), [#461](https://github.com/entireio/cli/pull/461), [#465](https://github.com/entireio/cli/pull/465))
+- `IsPreview()` on Agent interface to replace hardcoded name checks ([#412](https://github.com/entireio/cli/pull/412))
+- Stale session file cleanup ([#438](https://github.com/entireio/cli/pull/438))
+- Redesigned `entire status` with styled output and session cards ([#448](https://github.com/entireio/cli/pull/448))
+- Benchmark utilities for performance testing ([#449](https://github.com/entireio/cli/pull/449))
+
+### Changed
+
+- Refactored Agent interface: moved hook methods to `HookSupport`, removed unused methods ([#360](https://github.com/entireio/cli/pull/360), [#425](https://github.com/entireio/cli/pull/425), [#427](https://github.com/entireio/cli/pull/427), [#429](https://github.com/entireio/cli/pull/429))
+- `entire enable` now uses multi-select for agent selection with re-run awareness ([#362](https://github.com/entireio/cli/pull/362), [#443](https://github.com/entireio/cli/pull/443))
+- Use Anthropic API key for Claude Code agent detection ([#396](https://github.com/entireio/cli/pull/396))
+- Don't track gitignored files in session metadata ([#426](https://github.com/entireio/cli/pull/426))
+- Performance optimizations for `entire status` and `entire enable`: cached git paths, pure Go git operations, reftable support ([#436](https://github.com/entireio/cli/pull/436), [#454](https://github.com/entireio/cli/pull/454))
+- Streamlined `entire enable` setup flow with display names and iterative agent handling ([#440](https://github.com/entireio/cli/pull/440))
+- Git hooks are now a no-op if Entire is not enabled in the repo ([#445](https://github.com/entireio/cli/pull/445))
+- Resume sessions now sorted by creation time ascending ([#447](https://github.com/entireio/cli/pull/447))
+
+### Fixed
+
+- Secret redaction hardened across all checkpoint persistence paths ([#395](https://github.com/entireio/cli/pull/395))
+- Gemini session restore following latest Gemini pattern ([#403](https://github.com/entireio/cli/pull/403))
+- Transcript path stored in checkpoint metadata breaking location independence ([#403](https://github.com/entireio/cli/pull/403))
+- Integration tests hanging on machines with a TTY ([#414](https://github.com/entireio/cli/pull/414))
+- Stale ACTIVE/IDLE/ENDED sessions incorrectly condensed into every commit ([#418](https://github.com/entireio/cli/pull/418))
+- Gemini TTY handling when called as a hook ([#430](https://github.com/entireio/cli/pull/430))
+- Deselected agents reappearing as pre-selected on re-enable ([#443](https://github.com/entireio/cli/pull/443))
+- UTF-8 truncation producing garbled text for CJK/emoji characters ([#444](https://github.com/entireio/cli/pull/444))
+- Git refs resembling CLI flags causing errors ([#446](https://github.com/entireio/cli/pull/446))
+- Over-aggressive secret redaction in session transcripts ([#471](https://github.com/entireio/cli/pull/471))
+
+### Docs
+
+- Security and privacy documentation ([#398](https://github.com/entireio/cli/pull/398))
+- Agent integration checklist for validating new agent integrations ([#442](https://github.com/entireio/cli/pull/442))
+- Clarified README wording and agent-agnostic troubleshooting ([#453](https://github.com/entireio/cli/pull/453))
+
+### Thanks
+
+Thanks to @AlienKevin for contributing to this release!
+
+Thanks to @ammarateya ([#220](https://github.com/entireio/cli/pull/220)), @Avyukth ([#257](https://github.com/entireio/cli/pull/257)), and @MementoMori123 ([#315](https://github.com/entireio/cli/pull/315)) for their OpenCode PRs! We've now merged our OpenCode integration. While we went with our own implementation, your PRs were valuable in helping us validate our design choices and ensure we covered the right scenarios. We appreciate the effort you put into this!
+
 ## [0.4.5] - 2026-02-17
 
 ### Added

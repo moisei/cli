@@ -14,7 +14,9 @@ import (
 )
 
 // secretPattern matches high-entropy strings that may be secrets.
-var secretPattern = regexp.MustCompile(`[A-Za-z0-9/+_=-]{10,}`)
+// Note: / is excluded to prevent matching entire file paths as single tokens.
+// Base64 and JWT tokens are still caught via high-entropy segments between slashes.
+var secretPattern = regexp.MustCompile(`[A-Za-z0-9+_=-]{10,}`)
 
 // entropyThreshold is the minimum Shannon entropy for a string to be considered
 // a secret. 4.5 was chosen through trial and error: high enough to avoid false
@@ -50,8 +52,26 @@ func String(s string) string {
 
 	// 1. Entropy-based detection.
 	for _, loc := range secretPattern.FindAllStringIndex(s, -1) {
-		if shannonEntropy(s[loc[0]:loc[1]]) > entropyThreshold {
-			regions = append(regions, region{loc[0], loc[1]})
+		start, end := loc[0], loc[1]
+
+		// Don't consume characters that are part of JSON/string escape sequences.
+		// Example: in "controller.go\nmodel.go", the regex could match "nmodel"
+		// (consuming the 'n' from '\n'), and after replacement the '\' would be
+		// followed by 'R' from "REDACTED", creating invalid escape '\R'.
+		// Only skip for known JSON escape letters to avoid trimming real secrets
+		// that happen to follow a literal backslash in decoded content.
+		if start > 0 && s[start-1] == '\\' {
+			switch s[start] {
+			case 'n', 't', 'r', 'b', 'f', 'u', '"', '\\', '/':
+				start++
+				if end-start < 10 {
+					continue
+				}
+			}
+		}
+
+		if shannonEntropy(s[start:end]) > entropyThreshold {
+			regions = append(regions, region{start, end})
 		}
 	}
 
@@ -205,13 +225,26 @@ func collectJSONLReplacements(v any) [][2]string {
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
-// Skips "signature" (exact) and any key ending in "id" (case-insensitive).
+// Skips "signature" (exact), ID fields (ending in "id"/"ids"), and common path/directory fields.
 func shouldSkipJSONLField(key string) bool {
 	if key == "signature" {
 		return true
 	}
 	lower := strings.ToLower(key)
-	return strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids")
+
+	// Skip ID fields
+	if strings.HasSuffix(lower, "id") || strings.HasSuffix(lower, "ids") {
+		return true
+	}
+
+	// Skip common path and directory fields from agent transcripts.
+	// These appear frequently in tool calls and are structural, not secrets.
+	switch lower {
+	case "filepath", "file_path", "cwd", "root", "directory", "dir", "path":
+		return true
+	}
+
+	return false
 }
 
 // shouldSkipJSONLObject returns true if the object has "type":"image" or "type":"image_url".
