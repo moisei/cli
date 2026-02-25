@@ -28,10 +28,6 @@ COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/buildinfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/buildinfo.Commit=${COMMIT}" -o entire ./cmd/entire
 """
 
-[tasks."build:all"]
-description = "Build for all platforms using goreleaser"
-run = "goreleaser build --snapshot --clean"
-
 [tasks."completions"]
 description = "generate entire shell completions"
 quiet = true
