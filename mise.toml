@@ -23,8 +23,9 @@ run = "go test -tags=integration -race ./..."
 [tasks.build]
 description = "Build the CLI"
 run = """
-VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+TAG=$(git describe --tags --abbrev=0 || echo "v0.0.0")
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+VERSION="${TAG}-dev-${COMMIT}"
 go build -ldflags "-X github.com/entireio/cli/cmd/entire/cli/buildinfo.Version=${VERSION} -X github.com/entireio/cli/cmd/entire/cli/buildinfo.Commit=${COMMIT}" -o entire ./cmd/entire
 """
 
