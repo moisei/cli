@@ -4,7 +4,6 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 const hookPerfRepoURL = "https://github.com/entireio/cli.git"
@@ -29,18 +30,15 @@ const hookPerfRepoURL = "https://github.com/entireio/cli.git"
 //
 // It uses a full-history clone of entireio/cli (single branch) with seeded
 // branches and packed refs so that go-git operates on a realistic object
-// database, then loads session templates from the current repo's
-// .git/entire-sessions/ to create authentic session state distributions.
+// database. Each session is generated with a unique base commit (drawn from
+// real repo history) so that listAllSessionStates scans different shadow
+// branch names — matching production behavior where sessions span many commits.
 //
 // Prerequisites:
 //   - GitHub access (gh auth login) for cloning the private repo
-//   - At least one session state file in .git/entire-sessions/
 //
-// Run: go test -v -run TestCommitHookPerformance -tags hookperf -timeout 10m ./cmd/entire/cli/strategy/
+// Run: go test -v -run TestCommitHookPerformance -tags hookperf -timeout 15m ./cmd/entire/cli/strategy/
 func TestCommitHookPerformance(t *testing.T) {
-	// Load session templates from the current repo before cloning.
-	templates := loadSessionTemplates(t)
-
 	// Clone once, reuse across scenarios via cheap local clones.
 	cacheDir := cloneSourceRepo(t)
 
@@ -86,7 +84,11 @@ func TestCommitHookPerformance(t *testing.T) {
 
 			// --- TEST: commit with Entire hooks ---
 			createHookPerfSettings(t, dir)
-			seedHookPerfSessions(t, dir, templates, sc.ended, sc.idle, sc.active)
+
+			// Collect diverse base commits from real repo history so each
+			// ENDED session has a different shadow branch name.
+			baseCommits := collectBaseCommits(t, dir, totalSessions)
+			seedHookPerfSessions(t, dir, baseCommits, sc.ended, sc.idle, sc.active)
 
 			// Simulate TTY path with commit_linking=always.
 			t.Setenv("ENTIRE_TEST_TTY", "1")
@@ -143,6 +145,7 @@ func TestCommitHookPerformance(t *testing.T) {
 
 			t.Logf("=== %s ===", sc.name)
 			t.Logf("  Sessions:         %d (ended=%d, idle=%d, active=%d)", totalSessions, sc.ended, sc.idle, sc.active)
+			t.Logf("  Base commits:     %d unique", len(baseCommits))
 			t.Logf("  Control commit:   %s", controlDur.Round(time.Millisecond))
 			t.Logf("  PrepareCommitMsg: %s", prepDur.Round(time.Millisecond))
 			t.Logf("  PostCommit:       %s", postDur.Round(time.Millisecond))
@@ -160,8 +163,6 @@ func TestCommitHookPerformance(t *testing.T) {
 	}
 
 	// Print comparison table.
-	t.Log("")
-	t.Logf("Session templates: %d loaded from .git/entire-sessions/", len(templates))
 	t.Log("")
 	t.Log("========== COMMIT HOOK PERFORMANCE ==========")
 	t.Logf("%-14s | %8s | %10s | %10s | %12s | %12s | %10s",
@@ -185,55 +186,43 @@ func TestCommitHookPerformance(t *testing.T) {
 	}
 }
 
-// sessionTemplate is a parsed session state file used as a template for seeding.
-type sessionTemplate struct {
-	state *session.State
-}
-
-// loadSessionTemplates reads .git/entire-sessions/*.json from the current repo
-// and returns them as templates. Fatals if no templates are found.
-func loadSessionTemplates(t *testing.T) []sessionTemplate {
+// collectBaseCommits walks the repo's commit history and returns up to `need`
+// unique commit hashes. These are used as BaseCommit values so each session
+// references a different shadow branch name — matching production behavior
+// where sessions span many different commits over time.
+func collectBaseCommits(t *testing.T, dir string, need int) []string {
 	t.Helper()
 
-	// Find the current repo's .git/entire-sessions/ directory.
-	repoRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		t.Fatalf("git rev-parse --show-toplevel: %v", err)
+		t.Fatalf("open repo for base commits: %v", err)
 	}
-	sessDir := filepath.Join(strings.TrimSpace(string(repoRoot)), ".git", session.SessionStateDirName)
-
-	entries, err := os.ReadDir(sessDir)
+	head, err := repo.Head()
 	if err != nil {
-		t.Fatalf("read %s: %v", sessDir, err)
+		t.Fatalf("head for base commits: %v", err)
 	}
 
-	var templates []sessionTemplate
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		if strings.HasSuffix(entry.Name(), ".tmp") {
-			continue
-		}
+	var commits []string
+	iter, err := repo.Log(&git.LogOptions{From: head.Hash()})
+	if err != nil {
+		t.Fatalf("log for base commits: %v", err)
+	}
+	defer iter.Close()
 
-		data, err := os.ReadFile(filepath.Join(sessDir, entry.Name())) //nolint:gosec // test file
-		if err != nil {
-			t.Logf("  skip %s: %v", entry.Name(), err)
-			continue
+	err = iter.ForEach(func(c *object.Commit) error {
+		if len(commits) >= need {
+			return fmt.Errorf("done") //nolint:goerr113 // sentinel to stop iteration
 		}
-		var state session.State
-		if err := json.Unmarshal(data, &state); err != nil {
-			t.Logf("  skip %s: %v", entry.Name(), err)
-			continue
-		}
-		templates = append(templates, sessionTemplate{state: &state})
+		commits = append(commits, c.Hash.String())
+		return nil
+	})
+	// "done" sentinel is expected; real errors are not.
+	if err != nil && err.Error() != "done" {
+		t.Fatalf("walk commits: %v", err)
 	}
 
-	if len(templates) == 0 {
-		t.Fatal("no session templates found in .git/entire-sessions/ — need at least one")
-	}
-	t.Logf("Loaded %d session templates from .git/entire-sessions/", len(templates))
-	return templates
+	t.Logf("  Collected %d base commits from history (requested %d)", len(commits), need)
+	return commits
 }
 
 // timeControlCommit stages a file and times a bare `git commit` with no Entire
@@ -241,14 +230,12 @@ func loadSessionTemplates(t *testing.T) []sessionTemplate {
 func timeControlCommit(t *testing.T, dir string) time.Duration {
 	t.Helper()
 
-	// Write and stage a file.
 	controlFile := filepath.Join(dir, "perf_control.txt")
 	if err := os.WriteFile(controlFile, []byte("control commit content\n"), 0o644); err != nil {
 		t.Fatalf("write control file: %v", err)
 	}
 	gitRun(t, dir, "add", "perf_control.txt")
 
-	// Time the commit.
 	start := time.Now()
 	gitRun(t, dir, "commit", "-m", "control commit (no Entire)")
 	return time.Since(start)
@@ -354,28 +341,49 @@ func createHookPerfSettings(t *testing.T, dir string) {
 	}
 }
 
-// seedHookPerfSessions creates session state files using templates from the
-// current repo, duplicated round-robin to reach target counts.
+// Sample file lists for varied FilesTouched per session.
+var perfFileSets = [][]string{
+	{"main.go", "go.mod"},
+	{"cmd/entire/main.go", "cmd/entire/cli/root.go"},
+	{"go.sum", "README.md", "Makefile"},
+	{"cmd/entire/cli/strategy/common.go"},
+	{"cmd/entire/cli/session/state.go", "cmd/entire/cli/session/phase.go"},
+	{"cmd/entire/cli/paths/paths.go", "cmd/entire/cli/paths/worktree.go", "go.mod"},
+	{"cmd/entire/cli/agent/claude.go"},
+	{"docs/architecture/README.md", "CLAUDE.md"},
+}
+
+// Sample prompts for varied FirstPrompt per session.
+var perfPrompts = []string{
+	"implement the login feature",
+	"fix the bug in checkout flow",
+	"refactor the session management",
+	"add unit tests for the strategy package",
+	"update the documentation for hooks",
+	"optimize the database queries",
+	"add dark mode support",
+	"migrate to the new API version",
+	"fix the memory leak in the worker pool",
+	"add retry logic for failed API calls",
+	"implement webhook support",
+	"clean up unused imports and dead code",
+}
+
+// seedHookPerfSessions creates fully unique session state files.
+// Each session gets a unique base commit (from repo history), varied FilesTouched,
+// and unique prompts — avoiding template duplication artifacts.
 //
 // Phase distribution:
 //
 //	ENDED sessions: state file with LastCheckpointID (already condensed).
 //	IDLE sessions:  state file + shadow branch checkpoint via SaveStep.
 //	ACTIVE sessions: state file + shadow branch + live transcript file.
-func seedHookPerfSessions(t *testing.T, dir string, templates []sessionTemplate, ended, idle, active int) {
+func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended, idle, active int) {
 	t.Helper()
 
 	ctx := context.Background()
 
-	repo, err := git.PlainOpen(dir)
-	if err != nil {
-		t.Fatalf("open repo: %v", err)
-	}
-	head, err := repo.Head()
-	if err != nil {
-		t.Fatalf("head: %v", err)
-	}
-	baseCommit := head.Hash().String()
+	headCommit := baseCommits[0] // HEAD is always first
 
 	worktreeID, err := paths.GetWorktreeID(dir)
 	if err != nil {
@@ -388,30 +396,41 @@ func seedHookPerfSessions(t *testing.T, dir string, templates []sessionTemplate,
 	}
 	store := session.NewStateStoreWithDir(stateDir)
 
-	modifiedFiles := []string{"main.go", "go.mod"}
+	agentTypes := []agent.AgentType{
+		agent.AgentTypeClaudeCode,
+		agent.AgentTypeClaudeCode,
+		agent.AgentTypeClaudeCode,
+		agent.AgentTypeGemini,
+		agent.AgentTypeOpenCode,
+	}
 
-	// --- Seed ENDED sessions (from templates, round-robin) ---
+	// --- Seed ENDED sessions ---
+	// Each gets a unique base commit so listAllSessionStates looks up
+	// different shadow branch names (matching real-world behavior).
 	for i := range ended {
-		tmpl := templates[i%len(templates)]
 		sessionID := fmt.Sprintf("perf-ended-%d", i)
 		cpID := mustGenerateCheckpointID(t)
 		now := time.Now()
 
+		// Distribute across base commits. Use i+1 to skip HEAD (index 0)
+		// since ENDED sessions are from older commits.
+		baseIdx := (i + 1) % len(baseCommits)
+		base := baseCommits[baseIdx]
+
 		state := &session.State{
 			SessionID:           sessionID,
-			CLIVersion:          tmpl.state.CLIVersion,
-			BaseCommit:          baseCommit,
+			CLIVersion:          "dev",
+			BaseCommit:          base,
 			WorktreePath:        dir,
 			WorktreeID:          worktreeID,
 			Phase:               session.PhaseEnded,
 			StartedAt:           now.Add(-time.Duration(i+1) * time.Hour),
 			LastCheckpointID:    cpID,
-			StepCount:           max(tmpl.state.StepCount, 1),
-			FilesTouched:        modifiedFiles,
+			StepCount:           (i % 5) + 1,
+			FilesTouched:        perfFileSets[i%len(perfFileSets)],
 			LastInteractionTime: &now,
-			AgentType:           tmpl.state.AgentType,
-			TokenUsage:          tmpl.state.TokenUsage,
-			FirstPrompt:         tmpl.state.FirstPrompt,
+			AgentType:           agentTypes[i%len(agentTypes)],
+			FirstPrompt:         perfPrompts[i%len(perfPrompts)],
 		}
 		if err := store.Save(ctx, state); err != nil {
 			t.Fatalf("save ended state %d: %v", i, err)
@@ -419,20 +438,21 @@ func seedHookPerfSessions(t *testing.T, dir string, templates []sessionTemplate,
 	}
 
 	// --- Seed IDLE sessions (with shadow branches) ---
+	// IDLE sessions have the current HEAD as base commit (they're recent).
 	s := &ManualCommitStrategy{}
 	for i := range idle {
-		tmpl := templates[i%len(templates)]
 		sessionID := fmt.Sprintf("perf-idle-%d", i)
-		seedSessionWithShadowBranch(t, s, dir, sessionID, session.PhaseIdle, modifiedFiles)
+		files := perfFileSets[i%len(perfFileSets)]
+		seedSessionWithShadowBranch(t, s, dir, sessionID, session.PhaseIdle, files)
 
-		// Enrich state from template.
+		// Enrich state with unique data.
 		state, loadErr := s.loadSessionState(ctx, sessionID)
 		if loadErr != nil {
 			t.Fatalf("load idle state %d: %v", i, loadErr)
 		}
-		state.AgentType = tmpl.state.AgentType
-		state.TokenUsage = tmpl.state.TokenUsage
-		state.FirstPrompt = tmpl.state.FirstPrompt
+		state.AgentType = agentTypes[i%len(agentTypes)]
+		state.FirstPrompt = perfPrompts[i%len(perfPrompts)]
+		state.StepCount = (i % 3) + 1
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save idle state %d: %v", i, saveErr)
 		}
@@ -440,44 +460,51 @@ func seedHookPerfSessions(t *testing.T, dir string, templates []sessionTemplate,
 
 	// --- Seed ACTIVE sessions (shadow branch + live transcript) ---
 	for i := range active {
-		tmpl := templates[i%len(templates)]
 		sessionID := fmt.Sprintf("perf-active-%d", i)
-		seedSessionWithShadowBranch(t, s, dir, sessionID, session.PhaseActive, modifiedFiles)
+		files := perfFileSets[i%len(perfFileSets)]
+		seedSessionWithShadowBranch(t, s, dir, sessionID, session.PhaseActive, files)
 
-		// Create a live transcript file.
+		// Create a live transcript file with varied content.
 		claudeProjectDir := filepath.Join(dir, ".claude", "projects", "test", "sessions")
 		if err := os.MkdirAll(claudeProjectDir, 0o755); err != nil {
 			t.Fatalf("mkdir claude sessions: %v", err)
 		}
-		transcript := `{"type":"human","message":{"content":"implement feature"}}
-{"type":"assistant","message":{"content":"I'll implement that for you."}}
-{"type":"tool_use","name":"write","input":{"path":"main.go","content":"package main\n// modified\nfunc main() {}\n"}}
-`
+		prompt := perfPrompts[i%len(perfPrompts)]
+		transcript := fmt.Sprintf(`{"type":"human","message":{"content":"%s"}}
+{"type":"assistant","message":{"content":"I'll work on that for you. Let me start by examining the codebase."}}
+{"type":"tool_use","name":"read","input":{"path":"%s"}}
+{"type":"tool_use","name":"write","input":{"path":"%s","content":"package main\n// modified by session %d\nfunc main() {}\n"}}
+`, prompt, files[0], files[0], i)
 		transcriptFile := filepath.Join(claudeProjectDir, sessionID+".jsonl")
 		if err := os.WriteFile(transcriptFile, []byte(transcript), 0o644); err != nil {
 			t.Fatalf("write live transcript: %v", err)
 		}
 
-		// Enrich state from template.
 		state, loadErr := s.loadSessionState(ctx, sessionID)
 		if loadErr != nil {
 			t.Fatalf("load active state %d: %v", i, loadErr)
 		}
-		state.AgentType = tmpl.state.AgentType
-		state.TokenUsage = tmpl.state.TokenUsage
-		state.FirstPrompt = tmpl.state.FirstPrompt
+		state.AgentType = agentTypes[i%len(agentTypes)]
+		state.FirstPrompt = prompt
 		state.TranscriptPath = transcriptFile
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save active state %d: %v", i, saveErr)
 		}
 	}
 
-	// Verify seeded sessions.
+	// Count unique base commits actually used.
+	seen := make(map[string]struct{})
 	states, err := store.List(ctx)
 	if err != nil {
 		t.Fatalf("list states: %v", err)
 	}
-	t.Logf("  Seeded %d session state files (expected %d)", len(states), ended+idle+active)
+	for _, st := range states {
+		seen[st.BaseCommit] = struct{}{}
+	}
+
+	_ = headCommit // used by IDLE/ACTIVE sessions via SaveStep (reads HEAD)
+	t.Logf("  Seeded %d session state files (expected %d), %d unique base commits",
+		len(states), ended+idle+active, len(seen))
 }
 
 // seedSessionWithShadowBranch creates a session with a shadow branch checkpoint
@@ -488,6 +515,9 @@ func seedSessionWithShadowBranch(t *testing.T, s *ManualCommitStrategy, dir, ses
 
 	for _, f := range modifiedFiles {
 		abs := filepath.Join(dir, f)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", f, err)
+		}
 		content := fmt.Sprintf("package main\n// modified by agent %s\nfunc f() {}\n", sessionID)
 		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", f, err)

@@ -3,31 +3,44 @@
 ## Test Results (2026-02-27)
 
 Measured on a full-history single-branch clone of `entireio/cli` with 200 seeded branches and packed refs.
-12 session templates loaded from `.git/entire-sessions/` and duplicated round-robin.
+Each session generated with a unique base commit from repo history (89-441 unique base commits per scenario).
 
 | Scenario | Sessions | Control | Prepare | PostCommit | Total | Overhead |
 |----------|----------|---------|---------|------------|-------|----------|
-| 100      | 100      | 20ms    | 1.01s   | 984ms      | 2.00s | 1.98s    |
-| 200      | 200      | 30ms    | 2.09s   | 2.07s      | 4.16s | 4.13s    |
-| 500      | 500      | 30ms    | 5.45s   | 5.49s      | 10.9s | 10.9s    |
+| 100      | 100      | 29ms    | 165ms   | 172ms      | 337ms | 308ms    |
+| 200      | 200      | 30ms    | 303ms   | 314ms      | 617ms | 587ms    |
+| 500      | 500      | 30ms    | 743ms   | 773ms      | 1.52s | 1.49s    |
 
-**Scaling: ~21ms per session, linear.** Control commit (no Entire) is ~20-30ms regardless of session count.
+**Scaling: ~3ms per session, linear.** Control commit (no Entire) is ~30ms regardless of session count.
 
-### Shallow vs full-history clone comparison
+### Impact of test methodology
 
-An earlier version used `--depth 1` (shallow clone), which produced a ~900KB object database instead of the realistic ~50-100MB packfile. This understated go-git object resolution costs by ~15%:
+Earlier versions of this test had two issues that inflated the numbers:
 
-| Scenario | Shallow clone | Full history | Delta |
-|----------|---------------|--------------|-------|
-| 100 sess | 1.74s         | 2.00s        | +15%  |
-| 200 sess | 3.59s         | 4.16s        | +16%  |
-| 500 sess | 9.52s         | 10.9s        | +15%  |
+1. **Shallow clone** (`--depth 1`): Produced a ~900KB packfile instead of realistic ~50-100MB. Understated object resolution costs by ~15%.
 
-The difference comes from `tree.File()`, `commit.Tree()`, and `file.Contents()` operating on a larger packfile index. Ref resolution (`repo.Reference()`) is unaffected since packed-refs count is the same.
+2. **Shared base commits**: All sessions used the same `BaseCommit` (HEAD), so `listAllSessionStates()` looked up the same shadow branch name hundreds of times. With unique base commits drawn from real repo history, the numbers dropped **~85%** — from ~21ms/session to ~3ms/session.
+
+| Version | 100 sess | 200 sess | 500 sess | Per-session |
+|---------|----------|----------|----------|-------------|
+| Shallow + shared base | 1.74s | 3.59s | 9.52s | ~18ms |
+| Full history + shared base | 2.00s | 4.16s | 10.9s | ~21ms |
+| Full history + unique bases | 337ms | 617ms | 1.52s | ~3ms |
+
+The shared-base test was unrealistic because `listAllSessionStates()` scanned the packed-refs file for the same nonexistent shadow branch ref on every session. With unique base commits, each lookup targets a different ref name, matching production behavior where sessions span many commits over time.
+
+## How go-git `repo.Reference()` works
+
+go-git has **no caching** for packed ref lookups. Each `repo.Reference()` call:
+1. Tries to read a loose ref file (`.git/refs/heads/<name>`)
+2. On miss, opens `packed-refs` and scans line-by-line until match or EOF
+3. For refs that don't exist, scans the **entire** file every time
+
+After `git pack-refs --all` (the default state after `git gc`), all refs are in packed-refs and loose ref files don't exist. This means every lookup scans the file.
 
 ## Scaling Dimensions
 
-### 1. `repo.Reference()` — the dominant cost (~10-12ms/session)
+### 1. `repo.Reference()` — ref lookups (~1-2ms/session)
 
 Every session triggers multiple git ref lookups via go-git's `repo.Reference()`:
 
@@ -36,85 +49,68 @@ Every session triggers multiple git ref lookups via go-git's `repo.Reference()`:
 | `listAllSessionStates()` (line 91) | Both hooks | 1× |
 | `filterSessionsWithNewContent()` → `sessionHasNewContent()` (line 1131) | PrepareCommitMsg | 1× |
 | `postCommitProcessSession()` (line 840) | PostCommit | 1× |
-| `sessionHasNewContent()` in PostCommit (line 1131) | PostCommit (non-ACTIVE) | 1× |
 
-That's **2 calls per session in PrepareCommitMsg** and **2-3 in PostCommit**. Each call costs ~4-5ms because go-git iterates through refs rather than doing a hash-map lookup. With 200 packed branches, this is measurable.
+For ENDED sessions with `LastCheckpointID`, the orphan check at line 92 always passes (even when the ref doesn't exist), so the ref lookup cost is "wasted" work. These lookups dominate when base commits are shared (same ref scanned repeatedly), but with unique base commits the scan short-circuits at different positions.
 
-Note: PostCommit pre-resolves the shadow ref at line 840 and passes `cachedShadowTree` to `sessionHasNewContent()`, so the second lookup is avoided for sessions that hit that path. But `listAllSessionStates()` at line 91 always does a fresh lookup for every session.
+PostCommit pre-resolves the shadow ref at line 840 and passes `cachedShadowTree` to avoid redundant lookups within that hook.
 
-**Impact: ~10-12ms per session across both hooks combined.**
+**Impact: ~1-2ms per session across both hooks combined.**
 
-### 2. Transcript parsing — `countTranscriptItems()` (~2-3ms/session)
+### 2. `store.List()` — session state file I/O (~0.5-1ms/session)
 
-`sessionHasNewContent()` reads the transcript from the shadow branch tree and parses every JSONL line to count items (line 1159):
+`StateStore.List()` does `os.ReadDir()` + `Load()` for every `.json` file in `.git/entire-sessions/`. Each `Load()` reads a file, parses JSON, runs `NormalizeAfterLoad()`, and checks staleness. Called once per hook via `listAllSessionStates()` → `findSessionsForWorktree()`.
 
-```
-tree.File(metadataDir + "/full.jsonl")  → file.Contents() → countTranscriptItems()
-```
+**Impact: ~0.5-1ms per session.**
 
-This happens once per session in PrepareCommitMsg (`filterSessionsWithNewContent`) and once in PostCommit (`sessionHasNewContent` for non-ACTIVE sessions). The cost scales with transcript size — our test uses small transcripts (~3 lines), so real-world cost could be higher for sessions with large transcripts.
+### 3. Transcript parsing — `countTranscriptItems()` (~0.5-1ms/session, conditional)
 
-**Impact: ~2-3ms per session.**
+`sessionHasNewContent()` reads the transcript from the shadow branch tree and parses JSONL to count items. Only triggered for sessions that have a shadow branch (IDLE/ACTIVE, ~12% of sessions). ENDED sessions without shadow branches skip this entirely.
 
-### 3. `store.List()` — session state file I/O (~1-2ms/session)
+**Impact: ~0.5-1ms per session when triggered.**
 
-`StateStore.List()` does `os.ReadDir()` + `Load()` for every `.json` file in `.git/entire-sessions/`. Each `Load()` reads a file, parses JSON, runs `NormalizeAfterLoad()`, and checks staleness. This is called once per hook via `listAllSessionStates()` → `findSessionsForWorktree()`.
+### 4. Content overlap checks (~0.5-1ms/session, conditional)
 
-**Impact: ~1-2ms per session.**
+`stagedFilesOverlapWithContent()` (PrepareCommitMsg) and `filesOverlapWithContent()` (PostCommit) compare staged/committed files against `FilesTouched`. Only triggered for sessions with both `FilesTouched` and relevant staged/committed files.
 
-### 4. Tree traversal — `tree.File()` (~2-3ms/session)
-
-go-git's `tree.File()` walks the git tree object to find the transcript file under `.entire/metadata/<session-id>/full.jsonl`. This involves resolving subtree objects for each path component from the packfile. With a full-history packfile (~50-100MB), index lookups are slower than with a shallow clone's ~900KB packfile. Called once per session in the content-check path.
-
-**Impact: ~2-3ms per session.**
-
-### 5. Content overlap checks (~3-5ms/session, conditional)
-
-`stagedFilesOverlapWithContent()` (PrepareCommitMsg) and `filesOverlapWithContent()` (PostCommit) compare staged/committed files against the session's `FilesTouched` list. These involve reading tree entries and comparing blob hashes. Only triggered for sessions with `FilesTouched` and no transcript — which is most sessions in carry-forward scenarios.
-
-**Impact: ~3-5ms per session when triggered.**
+**Impact: ~0.5-1ms per session when triggered.**
 
 ## Cost Breakdown Per Session
 
 | Operation | Cost | Calls | Subtotal |
 |-----------|------|-------|----------|
-| `repo.Reference()` | 4-5ms | 2-3× | 8-15ms |
-| `countTranscriptItems()` | 2-3ms | 1× | 2-3ms |
-| `tree.File()` traversal | 2-3ms | 1× | 2-3ms |
-| `store.Load()` (JSON parse) | 1-2ms | 1× | 1-2ms |
-| Content overlap check | 3-5ms | 0-1× | 0-5ms |
-| **Total** | | | **~16-28ms (avg ~21ms)** |
+| `repo.Reference()` | 0.5-1ms | 2-3× | 1-2ms |
+| `store.Load()` (JSON parse) | 0.5-1ms | 1× | 0.5-1ms |
+| `countTranscriptItems()` | 0.5-1ms | 0-1× | 0-1ms |
+| Content overlap check | 0.5-1ms | 0-1× | 0-1ms |
+| **Total** | | | **~2-5ms (avg ~3ms)** |
 
 ## Why It's Linear
 
 The scaling is almost perfectly linear because:
 
 - Both hooks iterate over **all** sessions (`listAllSessionStates()` → `findSessionsForWorktree()`)
-- Each session independently triggers expensive git operations with no cross-session caching
+- Each session independently triggers file I/O (state loading) and git operations (ref lookups)
 - `listAllSessionStates()` does a `repo.Reference()` check for every session to detect orphans — even ENDED sessions that will never be condensed
-- `filterSessionsWithNewContent()` re-resolves the shadow branch ref that `listAllSessionStates()` already checked
 
 ## Optimization Opportunities
 
 ### High impact
 
-1. **Batch ref resolution in `listAllSessionStates()`**: Load all refs once into a map, then do O(1) lookups per session. Eliminates ~4-5ms × N from the first loop.
+1. **Skip orphan check for ENDED sessions with `LastCheckpointID`**: These sessions survive the check at line 92 anyway. Short-circuiting before `repo.Reference()` would eliminate ~88% of ref lookups in `listAllSessionStates()`.
 
-2. **Cache shadow ref across `listAllSessionStates()` → `filterSessionsWithNewContent()`**: The ref resolved at line 91 is thrown away and re-resolved at line 1131. Threading it through would save ~4-5ms × N.
-
-3. **Skip orphan cleanup for ENDED sessions with `LastCheckpointID`**: These sessions survive the orphan check anyway (line 92), so the `repo.Reference()` call is wasted. Short-circuit before the ref lookup.
+2. **Prune stale ENDED sessions**: Sessions older than `StaleSessionThreshold` (7 days) are already cleaned up by `StateStore.Load()`. Aggressively pruning ENDED sessions that haven't been interacted with would reduce the iteration count.
 
 ### Medium impact
 
-4. **Use `CheckpointTranscriptStart` instead of re-parsing transcripts**: The session state already tracks the transcript offset. Comparing it against the shadow branch commit count or a stored line count would avoid full JSONL parsing.
+3. **Batch ref resolution**: Load all refs once into a map for O(1) lookups. Less impactful now that per-session ref cost is ~0.5-1ms, but still useful at scale.
 
-5. **Lazy content checks**: Only call `sessionHasNewContent()` for sessions whose `FilesTouched` overlaps with staged/committed files. Skip sessions that can't possibly match.
+4. **Cache shadow ref across hooks**: The ref resolved in `listAllSessionStates()` is thrown away and re-resolved in `filterSessionsWithNewContent()`. Threading it through would avoid redundant lookups.
 
 ### Low impact
 
-6. **Parallel session processing**: Process sessions concurrently in the PostCommit loop (condensation is independent per session).
+5. **Use `CheckpointTranscriptStart` instead of re-parsing transcripts**: Avoid full JSONL parsing by comparing against a stored line count.
 
-7. **Pack state files**: Instead of one JSON file per session, use a single file with all session states to reduce `ReadDir()` + N file reads to one read.
+6. **Pack state files**: Single-file storage instead of one JSON per session to reduce `ReadDir()` + N file reads.
 
 ## Reproducing
 
@@ -122,4 +118,4 @@ The scaling is almost perfectly linear because:
 go test -v -run TestCommitHookPerformance -tags hookperf -timeout 15m ./cmd/entire/cli/strategy/
 ```
 
-Requires GitHub access for cloning and at least one session state file in `.git/entire-sessions/`.
+Requires GitHub access for cloning. Sessions are generated from repo commit history (no external templates needed).
