@@ -2,20 +2,32 @@
 
 ## Test Results (2026-02-27)
 
-Measured on a shallow clone of `entireio/cli` with 200 seeded branches and packed refs.
-11 session templates loaded from `.git/entire-sessions/` and duplicated round-robin.
+Measured on a full-history single-branch clone of `entireio/cli` with 200 seeded branches and packed refs.
+12 session templates loaded from `.git/entire-sessions/` and duplicated round-robin.
 
 | Scenario | Sessions | Control | Prepare | PostCommit | Total | Overhead |
 |----------|----------|---------|---------|------------|-------|----------|
-| 100      | 100      | 18ms    | 878ms   | 867ms      | 1.74s | 1.73s    |
-| 200      | 200      | 32ms    | 1.85s   | 1.74s      | 3.59s | 3.56s    |
-| 500      | 500      | 30ms    | 4.74s   | 4.78s      | 9.52s | 9.49s    |
+| 100      | 100      | 20ms    | 1.01s   | 984ms      | 2.00s | 1.98s    |
+| 200      | 200      | 30ms    | 2.09s   | 2.07s      | 4.16s | 4.13s    |
+| 500      | 500      | 30ms    | 5.45s   | 5.49s      | 10.9s | 10.9s    |
 
-**Scaling: ~18ms per session, linear.** Control commit (no Entire) is ~20-30ms regardless of session count.
+**Scaling: ~21ms per session, linear.** Control commit (no Entire) is ~20-30ms regardless of session count.
+
+### Shallow vs full-history clone comparison
+
+An earlier version used `--depth 1` (shallow clone), which produced a ~900KB object database instead of the realistic ~50-100MB packfile. This understated go-git object resolution costs by ~15%:
+
+| Scenario | Shallow clone | Full history | Delta |
+|----------|---------------|--------------|-------|
+| 100 sess | 1.74s         | 2.00s        | +15%  |
+| 200 sess | 3.59s         | 4.16s        | +16%  |
+| 500 sess | 9.52s         | 10.9s        | +15%  |
+
+The difference comes from `tree.File()`, `commit.Tree()`, and `file.Contents()` operating on a larger packfile index. Ref resolution (`repo.Reference()`) is unaffected since packed-refs count is the same.
 
 ## Scaling Dimensions
 
-### 1. `repo.Reference()` — the dominant cost (~8-10ms/session)
+### 1. `repo.Reference()` — the dominant cost (~10-12ms/session)
 
 Every session triggers multiple git ref lookups via go-git's `repo.Reference()`:
 
@@ -30,7 +42,7 @@ That's **2 calls per session in PrepareCommitMsg** and **2-3 in PostCommit**. Ea
 
 Note: PostCommit pre-resolves the shadow ref at line 840 and passes `cachedShadowTree` to `sessionHasNewContent()`, so the second lookup is avoided for sessions that hit that path. But `listAllSessionStates()` at line 91 always does a fresh lookup for every session.
 
-**Impact: ~8-10ms per session across both hooks combined.**
+**Impact: ~10-12ms per session across both hooks combined.**
 
 ### 2. Transcript parsing — `countTranscriptItems()` (~2-3ms/session)
 
@@ -50,11 +62,11 @@ This happens once per session in PrepareCommitMsg (`filterSessionsWithNewContent
 
 **Impact: ~1-2ms per session.**
 
-### 4. Tree traversal — `tree.File()` (~1-2ms/session)
+### 4. Tree traversal — `tree.File()` (~2-3ms/session)
 
-go-git's `tree.File()` walks the git tree object to find the transcript file under `.entire/metadata/<session-id>/full.jsonl`. This involves resolving subtree objects for each path component. Called once per session in the content-check path.
+go-git's `tree.File()` walks the git tree object to find the transcript file under `.entire/metadata/<session-id>/full.jsonl`. This involves resolving subtree objects for each path component from the packfile. With a full-history packfile (~50-100MB), index lookups are slower than with a shallow clone's ~900KB packfile. Called once per session in the content-check path.
 
-**Impact: ~1-2ms per session.**
+**Impact: ~2-3ms per session.**
 
 ### 5. Content overlap checks (~3-5ms/session, conditional)
 
@@ -68,10 +80,10 @@ go-git's `tree.File()` walks the git tree object to find the transcript file und
 |-----------|------|-------|----------|
 | `repo.Reference()` | 4-5ms | 2-3× | 8-15ms |
 | `countTranscriptItems()` | 2-3ms | 1× | 2-3ms |
+| `tree.File()` traversal | 2-3ms | 1× | 2-3ms |
 | `store.Load()` (JSON parse) | 1-2ms | 1× | 1-2ms |
-| `tree.File()` traversal | 1-2ms | 1× | 1-2ms |
 | Content overlap check | 3-5ms | 0-1× | 0-5ms |
-| **Total** | | | **~14-24ms (avg ~18ms)** |
+| **Total** | | | **~16-28ms (avg ~21ms)** |
 
 ## Why It's Linear
 
@@ -107,7 +119,7 @@ The scaling is almost perfectly linear because:
 ## Reproducing
 
 ```bash
-go test -v -run TestCommitHookPerformance -tags hookperf -timeout 10m ./cmd/entire/cli/strategy/
+go test -v -run TestCommitHookPerformance -tags hookperf -timeout 15m ./cmd/entire/cli/strategy/
 ```
 
 Requires GitHub access for cloning and at least one session state file in `.git/entire-sessions/`.

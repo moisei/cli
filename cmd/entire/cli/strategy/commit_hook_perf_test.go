@@ -27,9 +27,10 @@ const hookPerfRepoURL = "https://github.com/entireio/cli.git"
 // TestCommitHookPerformance measures the real overhead of Entire's commit hooks
 // by comparing a control commit (no Entire) against a commit with hooks active.
 //
-// It uses a shallow clone of entireio/cli with seeded branches and packed refs
-// to simulate a realistic repo, then loads session templates from the current
-// repo's .git/entire-sessions/ to create authentic session state distributions.
+// It uses a full-history clone of entireio/cli (single branch) with seeded
+// branches and packed refs so that go-git operates on a realistic object
+// database, then loads session templates from the current repo's
+// .git/entire-sessions/ to create authentic session state distributions.
 //
 // Prerequisites:
 //   - GitHub access (gh auth login) for cloning the private repo
@@ -278,8 +279,14 @@ func seedBranches(t *testing.T, dir string, count int) {
 	t.Logf("  Seeded %d branches", count)
 }
 
-// cloneSourceRepo does a one-time shallow clone of entireio/cli into a temp
+// cloneSourceRepo does a one-time full-history clone of entireio/cli into a temp
 // directory. Returns the path to use as a local clone source for each scenario.
+//
+// Uses --single-branch to limit network transfer to one branch while still
+// fetching the full commit history and object database. This gives us a
+// realistic packfile (~50-100MB) instead of a shallow clone's ~900KB, which
+// matters because go-git object resolution (tree.File, commit.Tree, file.Contents)
+// performance depends on packfile size and index complexity.
 func cloneSourceRepo(t *testing.T) string {
 	t.Helper()
 
@@ -288,11 +295,11 @@ func cloneSourceRepo(t *testing.T) string {
 		dir = resolved
 	}
 
-	t.Logf("Cloning %s (depth=1) ...", hookPerfRepoURL)
+	t.Logf("Cloning %s (full history, single branch) ...", hookPerfRepoURL)
 	start := time.Now()
 
 	//nolint:gosec // test-only, URL is a constant
-	cmd := exec.Command("git", "clone", "--depth", "1", hookPerfRepoURL, dir)
+	cmd := exec.Command("git", "clone", "--single-branch", hookPerfRepoURL, dir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git clone failed: %v\n%s", err, out)
