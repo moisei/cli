@@ -31,12 +31,18 @@ func BenchmarkPrepareCommitMsg(b *testing.B) {
 
 func benchPrepareCommitMsg(fileCount, sessionCount int) func(*testing.B) {
 	return func(b *testing.B) {
+		// Setup once before the loop — repo creation is expensive and
+		// PrepareCommitMsg only mutates COMMIT_EDITMSG on the idle-session + no-TTY path.
+		dir, commitMsgFile := benchSetupPrepareCommitMsgRepo(b, fileCount, sessionCount)
+		b.Chdir(dir)
+
+		b.ResetTimer()
 		for range b.N {
-			b.StopTimer()
-			dir, commitMsgFile := benchSetupPrepareCommitMsgRepo(b, fileCount, sessionCount)
-			b.Chdir(dir)
+			// Reset only what PrepareCommitMsg mutates
+			if err := os.WriteFile(commitMsgFile, []byte("implement feature\n"), 0o644); err != nil {
+				b.Fatalf("rewrite commit msg: %v", err)
+			}
 			paths.ClearWorktreeRootCache()
-			b.StartTimer()
 
 			s := &ManualCommitStrategy{}
 			if err := s.PrepareCommitMsg(context.Background(), commitMsgFile, ""); err != nil {
@@ -52,28 +58,31 @@ func benchPrepareCommitMsg(fileCount, sessionCount int) func(*testing.B) {
 func BenchmarkGetStagedFiles(b *testing.B) {
 	for _, fileCount := range []int{10, 100, 500} {
 		b.Run(fmt.Sprintf("Files_%d", fileCount), func(b *testing.B) {
+			// Setup once before the loop — repo creation + staging is expensive.
+			br := benchutil.NewBenchRepo(b, benchutil.RepoOpts{FileCount: fileCount})
+			b.Chdir(br.Dir)
+
+			// Stage some modifications
+			for i := range min(5, fileCount) {
+				name := fmt.Sprintf("src/file_%03d.go", i)
+				content := benchutil.GenerateGoFile(9000+i, 100)
+				br.WriteFile(b, name, content)
+				wt, err := br.Repo.Worktree()
+				if err != nil {
+					b.Fatalf("worktree: %v", err)
+				}
+				if _, err := wt.Add(name); err != nil {
+					b.Fatalf("add: %v", err)
+				}
+			}
+
+			b.ResetTimer()
 			for range b.N {
-				b.StopTimer()
-				br := benchutil.NewBenchRepo(b, benchutil.RepoOpts{FileCount: fileCount})
-				b.Chdir(br.Dir)
 				paths.ClearWorktreeRootCache()
 
-				// Stage some modifications
-				for i := range min(5, fileCount) {
-					name := fmt.Sprintf("src/file_%03d.go", i)
-					content := benchutil.GenerateGoFile(9000+i, 100)
-					br.WriteFile(b, name, content)
-					wt, err := br.Repo.Worktree()
-					if err != nil {
-						b.Fatalf("worktree: %v", err)
-					}
-					if _, err := wt.Add(name); err != nil {
-						b.Fatalf("add: %v", err)
-					}
+				if _, err := getStagedFiles(context.Background()); err != nil {
+					b.Fatalf("getStagedFiles: %v", err)
 				}
-				b.StartTimer()
-
-				_ = getStagedFiles(context.Background())
 			}
 		})
 	}

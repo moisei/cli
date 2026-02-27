@@ -1095,8 +1095,17 @@ func truncateHash(h string) string {
 func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context, repo *git.Repository, sessions []*SessionState) []*SessionState {
 	var result []*SessionState
 
-	// Compute staged files once for all sessions
-	stagedFiles := getStagedFiles(ctx)
+	// Compute staged files once for all sessions.
+	// On error, pass nil — sessionHasNewContent treats nil stagedFiles as
+	// "unavailable" and skips overlap checks, falling through to other heuristics.
+	stagedFiles, err := getStagedFiles(ctx)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "manual-commit"),
+			"filterSessionsWithNewContent: getStagedFiles failed, skipping overlap checks",
+			slog.String("error", err.Error()),
+		)
+		stagedFiles = nil
+	}
 
 	for _, state := range sessions {
 		hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{stagedFiles: stagedFiles})
@@ -1117,9 +1126,10 @@ func (s *ManualCommitStrategy) filterSessionsWithNewContent(ctx context.Context,
 // redundant work across multiple sessions in a single hook invocation.
 type contentCheckOpts struct {
 	// stagedFiles is the pre-computed list of staged files (from getStagedFiles).
-	// When nil, getStagedFiles is not called (PostCommit context where files are
-	// already committed). When non-nil (even if empty), the caller has already
-	// resolved staged files and no additional calls are needed.
+	// nil means staged files are unavailable (error or PostCommit context where
+	// files are already committed) — callers skip overlap checks and fall through
+	// to other heuristics (e.g., transcript growth).
+	// Non-nil empty means successfully resolved but no files are staged.
 	stagedFiles []string
 
 	// shadowTree, when non-nil, is used directly to avoid redundant shadow branch
@@ -1833,26 +1843,29 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 // This is much faster than go-git's worktree.Status() which scans the entire
 // working tree. `git diff --cached --name-only` uses native git's optimized index
 // and filesystem monitors.
-func getStagedFiles(ctx context.Context) []string {
+//
+// Returns (non-nil empty slice, nil) when no files are staged — callers can
+// distinguish "no staged files" from "error resolving staged files" (nil, err).
+func getStagedFiles(ctx context.Context) ([]string, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--name-only")
 	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("git diff --cached: %w", err)
 	}
 
-	var staged []string
+	staged := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line != "" {
 			staged = append(staged, line)
 		}
 	}
-	return staged
+	return staged, nil
 }
 
 // getLastPrompt retrieves the most recent user prompt from a session's shadow branch.
