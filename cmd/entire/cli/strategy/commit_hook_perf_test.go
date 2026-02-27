@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -341,7 +342,8 @@ func createHookPerfSettings(t *testing.T, dir string) {
 	}
 }
 
-// Sample file lists for varied FilesTouched per session.
+// Sample file lists for varied FilesTouched per session (used by IDLE/ACTIVE
+// which need actual files on disk via seedSessionWithShadowBranch).
 var perfFileSets = [][]string{
 	{"main.go", "go.mod"},
 	{"cmd/entire/main.go", "cmd/entire/cli/root.go"},
@@ -352,6 +354,40 @@ var perfFileSets = [][]string{
 	{"cmd/entire/cli/agent/claude.go"},
 	{"docs/architecture/README.md", "CLAUDE.md"},
 }
+
+// perfLargeFileSets provides realistic file path lists matching production
+// session sizes (30-80 files). Real sessions have 30-350+ files touched.
+// Each set includes "perf_control.txt" so PrepareCommitMsg's staged-file
+// overlap detection finds a match between staged files and FilesTouched.
+var perfLargeFileSets = func() [][]string {
+	dirs := []string{
+		"cmd/entire/cli/strategy",
+		"cmd/entire/cli/session",
+		"cmd/entire/cli/checkpoint",
+		"cmd/entire/cli/agent/claudecode",
+		"cmd/entire/cli/agent/geminicli",
+		"cmd/entire/cli/paths",
+		"cmd/entire/cli/logging",
+		"cmd/entire/cli/settings",
+		"cmd/entire/cli",
+		"docs/architecture",
+	}
+	var sets [][]string
+	for setIdx := range 8 {
+		size := 30 + (setIdx * 7) // 30, 37, 44, 51, 58, 65, 72, 79
+		files := []string{"perf_control.txt"}
+		for i := range size {
+			dir := dirs[i%len(dirs)]
+			suffix := ""
+			if i%3 == 1 {
+				suffix = "_test"
+			}
+			files = append(files, fmt.Sprintf("%s/gen_%d%s.go", dir, i, suffix))
+		}
+		sets = append(sets, files)
+	}
+	return sets
+}()
 
 // Sample prompts for varied FirstPrompt per session.
 var perfPrompts = []string{
@@ -373,9 +409,12 @@ var perfPrompts = []string{
 // Each session gets a unique base commit (from repo history), varied FilesTouched,
 // and unique prompts — avoiding template duplication artifacts.
 //
-// Phase distribution:
+// Phase distribution matches real-world observations from .git/entire-sessions/:
 //
-//	ENDED sessions: state file with LastCheckpointID (already condensed).
+//	ENDED sessions (75%): shadow branch ref + data, NO LastCheckpointID.
+//	    These exercise the expensive hot path: ref lookup → commit → tree →
+//	    transcript/overlap check → condensation during PostCommit.
+//	ENDED sessions (25%): state file with LastCheckpointID (already committed, cheap).
 //	IDLE sessions:  state file + shadow branch checkpoint via SaveStep.
 //	ACTIVE sessions: state file + shadow branch + live transcript file.
 func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended, idle, active int) {
@@ -404,17 +443,99 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 		agent.AgentTypeOpenCode,
 	}
 
+	s := &ManualCommitStrategy{}
+
 	// --- Seed ENDED sessions ---
-	// Each gets a unique base commit so listAllSessionStates looks up
-	// different shadow branch names (matching real-world behavior).
-	for i := range ended {
-		sessionID := fmt.Sprintf("perf-ended-%d", i)
+	// Real-world distribution (from .git/entire-sessions/ analysis):
+	//   ~75% have shadow branches with data but no LastCheckpointID (not yet committed)
+	//   ~25% have LastCheckpointID set and no shadow branch (already committed)
+	//
+	// The 75% exercise the expensive hot path per session:
+	//   listAllSessionStates: packed-refs linear scan to resolve shadow branch ref
+	//   sessionHasNewContent: ref → commit → tree → transcript/overlap check
+	//   PostCommit condensation: write metadata to entire/checkpoints/v1 branch
+	endedWithShadow := ended * 3 / 4
+	endedWithoutShadow := ended - endedWithShadow
+
+	var shadowCommitHash plumbing.Hash
+	if endedWithShadow > 0 {
+		// Create one template session via SaveStep to establish a shadow branch
+		// with a commit/tree containing proper transcript data.
+		templateID := "perf-ended-0"
+		seedSessionWithShadowBranch(t, s, dir, templateID, session.PhaseEnded, perfFileSets[0])
+
+		// Get the shadow branch commit hash to create alias refs.
+		repo, openErr := git.PlainOpen(dir)
+		if openErr != nil {
+			t.Fatalf("open repo for shadow refs: %v", openErr)
+		}
+		shadowName := checkpoint.ShadowBranchNameForCommit(headCommit, worktreeID)
+		ref, refErr := repo.Reference(plumbing.NewBranchReferenceName(shadowName), true)
+		if refErr != nil {
+			t.Fatalf("find template shadow branch %q: %v", shadowName, refErr)
+		}
+		shadowCommitHash = ref.Hash()
+
+		// Enrich template session with realistic FilesTouched.
+		tState, loadErr := s.loadSessionState(ctx, templateID)
+		if loadErr != nil {
+			t.Fatalf("load template state: %v", loadErr)
+		}
+		tState.AgentType = agentTypes[0]
+		tState.FirstPrompt = perfPrompts[0]
+		tState.FilesTouched = perfLargeFileSets[0]
+		if saveErr := s.saveSessionState(ctx, tState); saveErr != nil {
+			t.Fatalf("save template state: %v", saveErr)
+		}
+
+		// Remaining shadow-branch sessions: create alias refs + state files.
+		// Each gets a unique base commit → unique shadow branch name → different
+		// packed-refs lookup per session (go-git has no ref caching).
+		for i := 1; i < endedWithShadow; i++ {
+			sessionID := fmt.Sprintf("perf-ended-%d", i)
+			baseIdx := (i + 1) % len(baseCommits)
+			base := baseCommits[baseIdx]
+
+			// Create shadow branch ref pointing to template's commit.
+			// The hook code resolves this ref, gets the commit/tree, then
+			// checks for transcript or FilesTouched overlap — exercising
+			// the full expensive code path.
+			aliasName := checkpoint.ShadowBranchNameForCommit(base, worktreeID)
+			aliasRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(aliasName), shadowCommitHash)
+			if setErr := repo.Storer.SetReference(aliasRef); setErr != nil {
+				t.Fatalf("create shadow alias %d: %v", i, setErr)
+			}
+
+			now := time.Now()
+			state := &session.State{
+				SessionID:    sessionID,
+				CLIVersion:   "dev",
+				BaseCommit:   base,
+				WorktreePath: dir,
+				WorktreeID:   worktreeID,
+				Phase:        session.PhaseEnded,
+				StartedAt:    now.Add(-time.Duration(i+1) * time.Hour),
+				// No LastCheckpointID — exercises the expensive sessionHasNewContent path
+				StepCount:           (i % 5) + 1,
+				FilesTouched:        perfLargeFileSets[i%len(perfLargeFileSets)],
+				LastInteractionTime: &now,
+				AgentType:           agentTypes[i%len(agentTypes)],
+				FirstPrompt:         perfPrompts[i%len(perfPrompts)],
+			}
+			if saveErr := store.Save(ctx, state); saveErr != nil {
+				t.Fatalf("save ended-shadow state %d: %v", i, saveErr)
+			}
+		}
+	}
+
+	// Already-committed ENDED sessions (25%): state file only, no shadow branch.
+	// These have LastCheckpointID set — cheap path during hooks.
+	for i := range endedWithoutShadow {
+		idx := endedWithShadow + i
+		sessionID := fmt.Sprintf("perf-ended-%d", idx)
 		cpID := mustGenerateCheckpointID(t)
 		now := time.Now()
-
-		// Distribute across base commits. Use i+1 to skip HEAD (index 0)
-		// since ENDED sessions are from older commits.
-		baseIdx := (i + 1) % len(baseCommits)
+		baseIdx := (idx + 1) % len(baseCommits)
 		base := baseCommits[baseIdx]
 
 		state := &session.State{
@@ -424,22 +545,21 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			WorktreePath:        dir,
 			WorktreeID:          worktreeID,
 			Phase:               session.PhaseEnded,
-			StartedAt:           now.Add(-time.Duration(i+1) * time.Hour),
+			StartedAt:           now.Add(-time.Duration(idx+1) * time.Hour),
 			LastCheckpointID:    cpID,
-			StepCount:           (i % 5) + 1,
-			FilesTouched:        perfFileSets[i%len(perfFileSets)],
+			StepCount:           (idx % 5) + 1,
+			FilesTouched:        perfLargeFileSets[idx%len(perfLargeFileSets)],
 			LastInteractionTime: &now,
-			AgentType:           agentTypes[i%len(agentTypes)],
-			FirstPrompt:         perfPrompts[i%len(perfPrompts)],
+			AgentType:           agentTypes[idx%len(agentTypes)],
+			FirstPrompt:         perfPrompts[idx%len(perfPrompts)],
 		}
-		if err := store.Save(ctx, state); err != nil {
-			t.Fatalf("save ended state %d: %v", i, err)
+		if saveErr := store.Save(ctx, state); saveErr != nil {
+			t.Fatalf("save ended-committed state %d: %v", i, saveErr)
 		}
 	}
 
 	// --- Seed IDLE sessions (with shadow branches) ---
 	// IDLE sessions have the current HEAD as base commit (they're recent).
-	s := &ManualCommitStrategy{}
 	for i := range idle {
 		sessionID := fmt.Sprintf("perf-idle-%d", i)
 		files := perfFileSets[i%len(perfFileSets)]
@@ -466,8 +586,8 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 
 		// Create a live transcript file with varied content.
 		claudeProjectDir := filepath.Join(dir, ".claude", "projects", "test", "sessions")
-		if err := os.MkdirAll(claudeProjectDir, 0o755); err != nil {
-			t.Fatalf("mkdir claude sessions: %v", err)
+		if mkdirErr := os.MkdirAll(claudeProjectDir, 0o755); mkdirErr != nil {
+			t.Fatalf("mkdir claude sessions: %v", mkdirErr)
 		}
 		prompt := perfPrompts[i%len(perfPrompts)]
 		transcript := fmt.Sprintf(`{"type":"human","message":{"content":"%s"}}
@@ -476,8 +596,8 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 {"type":"tool_use","name":"write","input":{"path":"%s","content":"package main\n// modified by session %d\nfunc main() {}\n"}}
 `, prompt, files[0], files[0], i)
 		transcriptFile := filepath.Join(claudeProjectDir, sessionID+".jsonl")
-		if err := os.WriteFile(transcriptFile, []byte(transcript), 0o644); err != nil {
-			t.Fatalf("write live transcript: %v", err)
+		if writeErr := os.WriteFile(transcriptFile, []byte(transcript), 0o644); writeErr != nil {
+			t.Fatalf("write live transcript: %v", writeErr)
 		}
 
 		state, loadErr := s.loadSessionState(ctx, sessionID)
@@ -502,9 +622,8 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 		seen[st.BaseCommit] = struct{}{}
 	}
 
-	_ = headCommit // used by IDLE/ACTIVE sessions via SaveStep (reads HEAD)
-	t.Logf("  Seeded %d session state files (expected %d), %d unique base commits",
-		len(states), ended+idle+active, len(seen))
+	t.Logf("  Seeded %d sessions (ended=%d [%d shadow, %d committed], idle=%d, active=%d), %d unique base commits",
+		len(states), ended, endedWithShadow, endedWithoutShadow, idle, active, len(seen))
 }
 
 // seedSessionWithShadowBranch creates a session with a shadow branch checkpoint
