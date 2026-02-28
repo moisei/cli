@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -359,32 +360,43 @@ func prePromptStateFile(ctx context.Context, sessionID string) string {
 	return filepath.Join(tmpDirAbs, fmt.Sprintf("pre-prompt-%s.json", sessionID))
 }
 
-// getUntrackedFilesForState returns a list of untracked files using go-git
-// Excludes .entire directory
+// getUntrackedFilesForState returns a list of untracked files.
+// Uses git CLI for compatibility with repository extensions unsupported by go-git
+// (e.g. extensions.worktreeConfig). Excludes .entire directory.
 func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
-	repo, err := openRepository(ctx)
+	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil, err
+		repoRoot = "."
 	}
 
-	worktree, err := repo.Worktree()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--others", "--exclude-standard", "-z")
+	cmd.Dir = repoRoot
+	output, err := cmd.Output()
 	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	status, err := worktree.Status()
-	if err != nil {
-		return nil, err //nolint:wrapcheck // already present in codebase
-	}
-
-	untrackedFiles := []string{}
-	for file, st := range status {
-		if st.Worktree == git.Untracked {
-			// Exclude .entire directory
-			if !strings.HasPrefix(file, paths.EntireDir+"/") && file != paths.EntireDir {
-				untrackedFiles = append(untrackedFiles, file)
-			}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("git ls-files failed: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), err)
 		}
+		return nil, fmt.Errorf("git ls-files failed: %w", err)
+	}
+
+	if len(output) == 0 {
+		return []string{}, nil
+	}
+
+	entries := strings.Split(string(output), "\x00")
+	untrackedFiles := make([]string, 0, len(entries))
+	for _, file := range entries {
+		if file == "" {
+			continue
+		}
+
+		// Exclude .entire directory.
+		if strings.HasPrefix(file, paths.EntireDir+"/") || file == paths.EntireDir {
+			continue
+		}
+
+		untrackedFiles = append(untrackedFiles, file)
 	}
 
 	return untrackedFiles, nil

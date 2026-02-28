@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-git/go-git/v5"
@@ -21,6 +22,21 @@ func gitCheckout(t *testing.T, dir, ref string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to checkout %s: %v\nOutput: %s", ref, err, output)
 	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\nOutput: %s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestGetCurrentBranch(t *testing.T) {
@@ -576,6 +592,31 @@ func TestGetGitAuthorReturnsDefaultsWhenNoConfig(t *testing.T) {
 	}
 	if author.Email == "" {
 		t.Error("GetGitAuthor(context.Background()).Email is empty, expected a value or default")
+	}
+}
+
+func TestGetGitAuthorWithWorktreeConfigExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "config", "user.name", "Worktree Config User")
+	runGit(t, tmpDir, "config", "user.email", "worktree-config@example.com")
+	runGit(t, tmpDir, "config", "extensions.worktreeConfig", "true")
+
+	author, err := GetGitAuthor(context.Background())
+	if err != nil {
+		t.Fatalf("GetGitAuthor(context.Background()) error = %v, want nil", err)
+	}
+	if author == nil {
+		t.Fatal("GetGitAuthor(context.Background()) returned nil")
+	}
+
+	if author.Name != "Worktree Config User" {
+		t.Errorf("GetGitAuthor(context.Background()).Name = %q, want %q", author.Name, "Worktree Config User")
+	}
+	if author.Email != "worktree-config@example.com" {
+		t.Errorf("GetGitAuthor(context.Background()).Email = %q, want %q", author.Email, "worktree-config@example.com")
 	}
 }
 

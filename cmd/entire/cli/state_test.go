@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -34,6 +36,66 @@ func TestPreTaskStateFile(t *testing.T) {
 // hasSuffix checks if path ends with suffix, handling path separators correctly
 func hasSuffix(path, suffix string) bool {
 	return len(path) >= len(suffix) && path[len(path)-len(suffix):] == suffix
+}
+
+func runGitInDir(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\nOutput: %s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func TestGetUntrackedFilesForState_WithWorktreeConfigExtension(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	paths.ClearWorktreeRootCache()
+
+	runGitInDir(t, tmpDir, "init")
+	runGitInDir(t, tmpDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, tmpDir, "config", "user.name", "Test User")
+
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatalf("failed to write .gitignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "tracked.txt"), []byte("tracked"), 0o644); err != nil {
+		t.Fatalf("failed to write tracked file: %v", err)
+	}
+	runGitInDir(t, tmpDir, "add", ".gitignore", "tracked.txt")
+	runGitInDir(t, tmpDir, "commit", "-m", "initial")
+
+	// This reproduces the reported incompatibility in go-git open paths.
+	runGitInDir(t, tmpDir, "config", "extensions.worktreeConfig", "true")
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("failed to write keep.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ignored.log"), []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("failed to write ignored.log: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire", "metadata"), 0o755); err != nil {
+		t.Fatalf("failed to create .entire metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "metadata", "session.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("failed to write .entire metadata file: %v", err)
+	}
+
+	files, err := getUntrackedFilesForState(context.Background())
+	if err != nil {
+		t.Fatalf("getUntrackedFilesForState() error = %v, want nil", err)
+	}
+
+	if len(files) != 1 || files[0] != "keep.txt" {
+		t.Fatalf("getUntrackedFilesForState() = %v, want [keep.txt]", files)
+	}
 }
 
 func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
@@ -298,13 +360,8 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize git repo
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
+	// Initialize a real git repository for git CLI-based state capture.
+	runGitInDir(t, tmpDir, "init")
 
 	// Clear the repo root cache to pick up the new repo
 	paths.ClearWorktreeRootCache()

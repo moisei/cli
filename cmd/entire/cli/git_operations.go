@@ -36,12 +36,20 @@ type GitAuthor struct {
 // If go-git can't find the config, it falls back to using the git command.
 // Returns fallback defaults if no user is configured anywhere.
 func GetGitAuthor(ctx context.Context) (*GitAuthor, error) {
-	repo, err := openRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
+	name := "Unknown"
+	email := "unknown@local"
 
-	name, email := strategy.GetGitAuthorFromRepo(repo)
+	repo, err := openRepository(ctx)
+	if err == nil {
+		name, email = strategy.GetGitAuthorFromRepo(repo)
+	} else {
+		// Preserve existing behavior when not in a git repository.
+		// If go-git fails to open a valid repository (e.g. unsupported extensions),
+		// continue with git CLI-based config lookup.
+		if _, rootErr := paths.WorktreeRoot(ctx); rootErr != nil {
+			return nil, fmt.Errorf("failed to open git repository: %w", err)
+		}
+	}
 
 	// If go-git returned defaults, try using git command as fallback
 	// This handles cases where go-git can't find the config (e.g., different HOME paths,

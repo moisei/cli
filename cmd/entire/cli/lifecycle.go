@@ -355,6 +355,16 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Get git author
 	author, err := GetGitAuthor(ctx)
 	if err != nil {
+		if isUnsupportedRepositoryExtensionError(err) {
+			logging.Warn(logCtx, "skipping checkpoint - repository extension unsupported by go-git",
+				slog.String("error", err.Error()))
+			transitionSessionTurnEnd(ctx, sessionID)
+			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+					slog.String("error", cleanupErr.Error()))
+			}
+			return nil
+		}
 		return fmt.Errorf("failed to get git author: %w", err)
 	}
 
@@ -392,6 +402,16 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	if err := strat.SaveStep(ctx, stepCtx); err != nil {
+		if isUnsupportedRepositoryExtensionError(err) {
+			logging.Warn(logCtx, "skipping checkpoint save - repository extension unsupported by go-git",
+				slog.String("error", err.Error()))
+			transitionSessionTurnEnd(ctx, sessionID)
+			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+					slog.String("error", cleanupErr.Error()))
+			}
+			return nil
+		}
 		return fmt.Errorf("failed to save step: %w", err)
 	}
 
@@ -633,6 +653,13 @@ func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sess
 	}
 
 	return 0
+}
+
+func isUnsupportedRepositoryExtensionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "does not support extension:")
 }
 
 // createContextFile creates a context.md file for the session checkpoint.
